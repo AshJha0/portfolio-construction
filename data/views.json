@@ -1,0 +1,19 @@
+{
+  "tau": 0.05,
+  "delta": 2.5,
+  "views": [
+    {
+      "type": "absolute",
+      "asset": "EM_EQ",
+      "q": 0.1,
+      "confidence": 1.0
+    },
+    {
+      "type": "relative",
+      "long": "US_EQ",
+      "short": "EU_EQ",
+      "q": 0.02,
+      "confidence": 0.5
+    }
+  ]
+}

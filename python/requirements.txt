@@ -1,0 +1,7 @@
+# Runtime dependency of the portopt package (numpy used internally only;
+# every algorithm is pinned in API_SPEC.md so scipy-free ports match).
+numpy>=1.24
+
+# Test-only dependencies (scipy is used exclusively as a cross-check in tests).
+pytest>=7.0
+scipy>=1.10

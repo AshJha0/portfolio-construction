@@ -1,0 +1,17 @@
+sequenceDiagram
+    participant D as Demo / caller
+    participant B as run_backtest
+    participant W as weight_fn
+    participant M as metrics
+
+    D->>B: X (1250 x 8), weight_fn, rf, W=500, step=63
+    B->>B: dates = [500, 563, ..., 1193] (12)
+    loop each rebalance t_k
+        B->>W: history = X[0 : t_k]  (expanding, no look-ahead)
+        W-->>B: w_k (sum = 1 within 1e-6, else error)
+        B->>B: port[t_k .. t_end) = X[t_k .. t_end) @ w_k
+    end
+    B->>B: turnover_k = sum_i |w_k - w_(k-1)|, k >= 1
+    B->>M: port (750 daily returns)
+    M-->>B: ann_return, ann_vol, sharpe, maxDD
+    B-->>D: BacktestResult

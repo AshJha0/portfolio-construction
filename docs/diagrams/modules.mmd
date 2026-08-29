@@ -1,0 +1,84 @@
+classDiagram
+    class linalg {
+        +cholesky(A) L
+        +chol_solve(L, b) x
+        +spd_solve(A, b) x
+        +spd_inverse(A) Ainv
+        +check_square_symmetric(A)
+        PIVOT_RTOL = 1e-13
+    }
+    class estimators {
+        +sample_mean(X) mu
+        +sample_cov(X) S
+        +shrink_covariance(X) ShrinkageResult
+        +annualize_mean(mu, 252)
+        +annualize_cov(S, 252)
+    }
+    class markowitz {
+        +two_fund_scalars(mu, S) TwoFundScalars
+        +min_variance_weights(S) w
+        +tangency_weights(mu, S, rf) w
+        +frontier_weights(mu, S, m) w
+        +efficient_frontier(mu, S, 25)
+        +project_simplex_box(v, total, lb, ub) w
+        +pgd_minimize(f, grad, proj, w0)
+        +min_variance_longonly(S, lb, ub) w
+        +constrained_frontier(mu, S, 25)
+    }
+    class black_litterman {
+        +implied_equilibrium_returns(S, w_mkt, delta) pi
+        +views_to_matrices(views, names) P,Q,conf
+        +default_omega(S, P, tau, conf) Omega
+        +bl_posterior(S, pi, P, Q, tau, Omega) BLResult
+        +bl_weights(...) w, BLResult
+    }
+    class risk_parity {
+        +risk_contributions(w, S) rc
+        +risk_budget_solve(S, b) w,sweeps,flag
+        +erc_weights(S) w
+        +inverse_vol_weights(S) w
+    }
+    class backtest {
+        +rebalance_indices(T, 500, 63)
+        +run_backtest(X, weight_fn, rf) BacktestResult
+        +sharpe_ratio(r, rf)
+        +max_drawdown(r)
+    }
+    class TwoFundScalars {
+        a
+        b
+        c
+        d
+    }
+    class ShrinkageResult {
+        sigma
+        intensity
+        rbar
+        target
+    }
+    class BLResult {
+        mu_post
+        sigma_post
+        m
+        omega
+    }
+    class BacktestResult {
+        weights
+        turnovers
+        ann_return
+        ann_vol
+        sharpe
+        max_drawdown
+        avg_turnover
+    }
+
+    estimators --> linalg : PSD gate
+    markowitz --> linalg : all Sigma^-1 x
+    black_litterman --> linalg : k x k solve
+    black_litterman --> markowitz : posterior tangency
+    risk_parity --> linalg : SPD gate
+    backtest --> estimators : validation
+    markowitz ..> TwoFundScalars
+    estimators ..> ShrinkageResult
+    black_litterman ..> BLResult
+    backtest ..> BacktestResult

@@ -1,0 +1,21 @@
+{
+  "assets": [
+    "US_EQ",
+    "EU_EQ",
+    "JP_EQ",
+    "UK_EQ",
+    "EM_EQ",
+    "US_BOND",
+    "IG_CORP",
+    "FX_CARRY"
+  ],
+  "annualization_factor": 252,
+  "risk_free_rate": 0.02,
+  "risk_aversion_delta": 2.5,
+  "tau": 0.05,
+  "estimation_window": 500,
+  "rebalance_step": 63,
+  "frontier_points": 25,
+  "frontier_penalty": 10000.0,
+  "seed": 42
+}

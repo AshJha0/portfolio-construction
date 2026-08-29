@@ -1,0 +1,53 @@
+flowchart TD
+    subgraph DATA["data/ (deterministic, seed 42)"]
+        RET[asset_returns.csv<br/>1250 x 8 daily returns]
+        CAPS[market_caps.csv]
+        VIEWS[views.json]
+        CFG[config.json<br/>252, rf, tau, delta, W, step]
+    end
+
+    subgraph EST["estimators"]
+        MU["sample_mean -> annualize (x252)"]
+        COV["sample_cov (ddof=1) -> annualize"]
+        LW["shrink_covariance<br/>delta*F + (1-delta)*S"]
+    end
+
+    subgraph LA["linalg (pinned kernel)"]
+        CHOL["cholesky: Banachiewicz,<br/>pivot > 1e-13 * diag"]
+        SOLVE["chol_solve: forward + back<br/>substitution"]
+    end
+
+    subgraph OPT["portfolio constructors"]
+        TF["two_fund_scalars A,B,C,D<br/>min-var / tangency / frontier"]
+        PGD["PGD + exact box-simplex projection<br/>long-only min-var, penalty frontier"]
+        BL["black_litterman<br/>pi = delta*Sigma*w_mkt -> posterior"]
+        RP["risk_parity CCD<br/>y_i quadratic update"]
+    end
+
+    BT["backtest: t_k = 500 + 63k,<br/>expanding window, L1 turnover"]
+    OUTG["golden.json (21 cases)"]
+    OUTD["demo report"]
+
+    RET --> MU
+    RET --> COV
+    RET --> LW
+    CFG --> MU
+    CFG --> COV
+    COV --> TF
+    COV --> PGD
+    COV --> BL
+    COV --> RP
+    MU --> TF
+    MU --> BL
+    CAPS --> BL
+    VIEWS --> BL
+    CHOL --> SOLVE
+    LA -. "every Sigma^-1 x" .-> OPT
+    TF --> BT
+    PGD --> BT
+    BL --> BT
+    RP --> BT
+    RET --> BT
+    BT --> OUTD
+    OPT --> OUTG
+    OPT --> OUTD
