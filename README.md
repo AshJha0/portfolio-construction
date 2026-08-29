@@ -1,4 +1,4 @@
-# portopt — Portfolio Construction (Markowitz, Black-Litterman, Risk Parity)
+# Portfolio Construction (Markowitz, Black-Litterman, Risk Parity)
 
 A four-language reference implementation of classical portfolio construction:
 sample and Ledoit-Wolf shrinkage estimators, closed-form and constrained
