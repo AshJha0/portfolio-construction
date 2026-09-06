@@ -64,32 +64,32 @@ fn run() -> po::Result<()> {
     }
 
     // -------------------------------------------------------------- frontier
-    rule("Efficient frontier sweep (25 points, showing every 4th)");
+    rule("Efficient frontier sweeps (25 points each, showing every 4th)");
     let sweep_u = po::efficient_frontier(&mu, &sig, cfg.frontier_points)?;
-    let sweep_c = po::constrained_frontier(
-        &mu,
-        &sig,
-        cfg.frontier_points,
-        cfg.frontier_penalty,
-        None,
-        None,
-    )?;
-    println!("{:>8}{:>11}{:>15}", "target", "vol uncon", "vol long-only");
+    let sweep_c = po::constrained_frontier(&mu, &sig, cfg.frontier_points, None, None)?;
+    println!("unconstrained grid: A/C .. max(mu);  long-only grid: constrained GMV .. max(mu)");
+    println!("{:>8}{:>11}{:>10}{:>15}", "target", "vol uncon", "target", "vol long-only");
     for k in (0..sweep_u.targets.len()).step_by(4) {
         println!(
-            "{:>8.4}{:>11.4}{:>15.4}",
+            "{:>8.4}{:>11.4}{:>10.4}{:>15.4}",
             sweep_u.targets[k],
             sweep_u.variances[k].sqrt(),
+            sweep_c.targets[k],
             sweep_c.variances[k].sqrt()
         );
     }
+    let gap = (0..sweep_c.targets.len())
+        .map(|k| (po::linalg::dot(&mu, &sweep_c.weights[k]) - sweep_c.targets[k]).abs())
+        .fold(0.0_f64, f64::max);
+    println!("long-only targets met exactly: max |mu'w - target| = {gap:.1e}");
     let w_tan = po::tangency_weights(&mu, &sig, rf)?;
     let tan_ret = po::linalg::dot(&mu, &w_tan);
     let tan_vol = po::linalg::dot(&w_tan, &sig.matvec(&w_tan)).sqrt();
     println!(
-        "tangency (rf={:.2}%): sharpe = {:.4}",
+        "tangency (rf={:.2}%): sharpe = {:.4}, gross leverage = {:.2}",
         100.0 * rf,
-        (tan_ret - rf) / tan_vol
+        (tan_ret - rf) / tan_vol,
+        po::gross_leverage(&w_tan)?
     );
 
     // ------------------------------------------------------- black-litterman
@@ -122,6 +122,7 @@ fn run() -> po::Result<()> {
     println!("{}", wrow("mu posterior", &res.mu_post));
     println!("{}", wrow("w market", &w_mkt));
     println!("{}", wrow("w posterior", &w_bl));
+    println!("posterior gross leverage = {:.4}", po::gross_leverage(&w_bl)?);
 
     // ----------------------------------------------------------- risk parity
     rule("Risk contributions: ERC vs inverse-vol");
@@ -168,12 +169,13 @@ fn run() -> po::Result<()> {
             Box::new(|h: &Matrix| {
                 // Pinned backtest method (API_SPEC 6.3): tangency, falling
                 // back to unconstrained min-variance for a rebalance where
-                // tangency is undefined — reported, not crashed.
+                // tangency is undefined or ill-conditioned — reported, not
+                // crashed. Any other error (e.g. singular covariance) propagates.
                 let s = po::annualize_cov(&po::sample_cov(h)?, ann)?;
                 let m = po::annualize_mean(&po::sample_mean(h)?, ann)?;
                 match po::tangency_weights(&m, &s, rf) {
                     Ok(w) => Ok(w),
-                    Err(PortOptError::Undefined(_)) => {
+                    Err(PortOptError::TangencyUndefined(_)) => {
                         fallbacks += 1;
                         po::min_variance_weights(&s)
                     }
@@ -214,8 +216,8 @@ fn run() -> po::Result<()> {
     }
     if fallbacks > 0 {
         println!(
-            "note: tangency undefined at {fallbacks} rebalance date(s) \
-             (rf above min-var return); fell back to min-variance there."
+            "note: tangency undefined/ill-conditioned at {fallbacks} rebalance date(s) \
+             (rf at or above the min-var return); fell back to min-variance there."
         );
     }
 

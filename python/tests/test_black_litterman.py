@@ -139,3 +139,64 @@ def test_bl_error_paths(bl_setup):
         po.bl_posterior(s["sigma"], s["pi"], s["p"], np.array([0.05]), s["tau"])
     with pytest.raises(ValueError, match="non-empty"):
         po.views_to_matrices([], ["A"])
+    with pytest.raises(ValueError, match="rf must be finite"):
+        po.bl_weights(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], rf=np.nan)
+
+
+def test_relative_view_same_legs_rejected(asset_names):
+    """PT-7 (MAJ-2): long == short would silently become an absolute short
+    view with the naive +1/-1 assignment."""
+    with pytest.raises(ValueError, match="long and short legs must differ"):
+        po.views_to_matrices(
+            [{"type": "relative", "long": "US_EQ", "short": "US_EQ", "q": 0.02}], asset_names
+        )
+
+
+def test_views_parse_error_paths(asset_names):
+    """PT-11: unknown asset, missing keys, NaN q, duplicate names — always a
+    descriptive ValueError, never KeyError or a silent P row."""
+    with pytest.raises(ValueError, match="unknown asset name 'NOPE'"):
+        po.views_to_matrices([{"type": "absolute", "asset": "NOPE", "q": 0.1}], asset_names)
+    with pytest.raises(ValueError, match="missing required key 'q'"):
+        po.views_to_matrices([{"type": "absolute", "asset": "US_EQ"}], asset_names)
+    with pytest.raises(ValueError, match="missing required key 'asset'"):
+        po.views_to_matrices([{"type": "absolute", "q": 0.1}], asset_names)
+    with pytest.raises(ValueError, match="missing required key 'short'"):
+        po.views_to_matrices([{"type": "relative", "long": "US_EQ", "q": 0.1}], asset_names)
+    with pytest.raises(ValueError, match="q must be finite"):
+        po.views_to_matrices([{"type": "absolute", "asset": "US_EQ", "q": np.nan}], asset_names)
+    with pytest.raises(ValueError, match="unknown view type"):
+        po.views_to_matrices([{"type": "momentum", "asset": "US_EQ", "q": 0.1}], asset_names)
+    with pytest.raises(ValueError, match="duplicates"):
+        po.views_to_matrices(
+            [{"type": "absolute", "asset": "US_EQ", "q": 0.1}], list(asset_names) + ["US_EQ"]
+        )
+    with pytest.raises(ValueError, match="confidence"):
+        po.views_to_matrices(
+            [{"type": "absolute", "asset": "US_EQ", "q": 0.1, "confidence": 0.0}], asset_names
+        )
+    # missing confidence defaults to 1
+    _, _, conf = po.views_to_matrices([{"type": "absolute", "asset": "US_EQ", "q": 0.1}], asset_names)
+    assert conf.tolist() == [1.0]
+
+
+def test_omega_and_confidences_together_rejected(bl_setup):
+    """MIN-12: an explicit Omega plus confidences would silently ignore the
+    confidences."""
+    s = bl_setup
+    om = po.default_omega(s["sigma"], s["p"], s["tau"], s["conf"])
+    with pytest.raises(ValueError, match="confidences are only used with the default Omega"):
+        po.bl_posterior(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om, confidences=s["conf"])
+    with pytest.raises(ValueError, match="confidences are only used with the default Omega"):
+        po.bl_weights(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om, confidences=s["conf"])
+    # explicit default Omega alone reproduces the confidence-scaled posterior
+    a = po.bl_posterior(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om)
+    b = po.bl_posterior(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], confidences=s["conf"])
+    assert np.allclose(a.mu_post, b.mu_post, atol=1e-16, rtol=0)
+
+
+def test_bl_weights_leverage_diagnostic(bl_setup):
+    s = bl_setup
+    w, _ = po.bl_weights(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], confidences=s["conf"])
+    assert po.gross_leverage(w) > 1.0  # the posterior shorts EU_EQ
+    assert po.gross_leverage(w) == pytest.approx(np.abs(w).sum(), abs=1e-14)

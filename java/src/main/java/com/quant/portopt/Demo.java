@@ -78,17 +78,26 @@ public final class Demo {
         }
 
         // ------------------------------------------------------------- frontier
-        rule("Efficient frontier sweep (25 points, showing every 4th)");
+        rule("Efficient frontier sweeps (25 points each, showing every 4th)");
         Markowitz.Frontier front = Markowitz.efficientFrontier(mu, sig, frontierPoints);
         Markowitz.Frontier frontC = Markowitz.constrainedFrontier(mu, sig, frontierPoints);
-        System.out.printf("%8s%11s%15s%n", "target", "vol uncon", "vol long-only");
+        System.out.println(
+                "unconstrained grid: A/C .. max(mu);  long-only grid: constrained GMV .. max(mu)");
+        System.out.printf("%8s%11s%10s%15s%n", "target", "vol uncon", "target", "vol long-only");
         for (int k = 0; k < front.targets().length; k += 4) {
-            System.out.printf("%8.4f%11.4f%15.4f%n", front.targets()[k],
-                    Math.sqrt(front.variances()[k]), Math.sqrt(frontC.variances()[k]));
+            System.out.printf("%8.4f%11.4f%10.4f%15.4f%n", front.targets()[k],
+                    Math.sqrt(front.variances()[k]), frontC.targets()[k],
+                    Math.sqrt(frontC.variances()[k]));
         }
+        double gap = 0.0;
+        for (int k = 0; k < frontC.targets().length; k++) {
+            gap = Math.max(gap, Math.abs(Linalg.dot(mu, frontC.weights()[k]) - frontC.targets()[k]));
+        }
+        System.out.printf("long-only targets met exactly: max |mu'w - target| = %.1e%n", gap);
         double[] wTan = Markowitz.tangencyWeights(mu, sig, rf);
         double tanSharpe = (Linalg.dot(mu, wTan) - rf) / Math.sqrt(Linalg.quadForm(wTan, sig));
-        System.out.printf("tangency (rf=%.2f%%): sharpe = %.4f%n", 100 * rf, tanSharpe);
+        System.out.printf("tangency (rf=%.2f%%): sharpe = %.4f, gross leverage = %.2f%n",
+                100 * rf, tanSharpe, Markowitz.grossLeverage(wTan));
 
         // ------------------------------------------------------ black-litterman
         rule("Black-Litterman: prior (equilibrium) vs posterior weights");
@@ -121,6 +130,7 @@ public final class Demo {
         System.out.println(wrow("mu posterior", res.muPost()));
         System.out.println(wrow("w market", wMkt));
         System.out.println(wrow("w posterior", wBl));
+        System.out.printf("posterior gross leverage = %.4f%n", Markowitz.grossLeverage(wBl));
 
         // ---------------------------------------------------------- risk parity
         rule("Risk contributions: ERC vs inverse-vol");
@@ -148,13 +158,14 @@ public final class Demo {
                 Estimators.annualizeCov(Estimators.sampleCov(h), annualization)));
         methods.put("tangency", h -> {
             // Pinned backtest method: tangency, falling back to unconstrained
-            // min-variance where tangency is undefined (A - rf*C <= 0) —
-            // reported, not crashed (API_SPEC 6.3).
+            // min-variance where tangency is undefined or ill-conditioned —
+            // reported, not crashed (API_SPEC 6.3). Any other error (e.g. a
+            // singular covariance) propagates.
             double[][] s = Estimators.annualizeCov(Estimators.sampleCov(h), annualization);
             try {
                 return Markowitz.tangencyWeights(
                         Estimators.annualizeMean(Estimators.sampleMean(h), annualization), s, rf);
-            } catch (IllegalArgumentException e) {
+            } catch (Markowitz.TangencyUndefinedException e) {
                 fallbacks[0]++;
                 return Markowitz.minVarianceWeights(s);
             }
@@ -175,8 +186,8 @@ public final class Demo {
                     r.annReturn(), r.annVol(), r.sharpe(), r.maxDrawdown(), r.avgTurnover());
         }
         if (fallbacks[0] > 0) {
-            System.out.printf("note: tangency undefined at %d rebalance date(s) "
-                    + "(rf above min-var return); fell back to min-variance there.%n",
+            System.out.printf("note: tangency undefined/ill-conditioned at %d rebalance date(s) "
+                    + "(rf at or above the min-var return); fell back to min-variance there.%n",
                     fallbacks[0]);
         }
 

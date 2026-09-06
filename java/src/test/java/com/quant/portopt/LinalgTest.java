@@ -110,4 +110,16 @@ public class LinalgTest {
         assertThrows(IllegalArgumentException.class,
                 () -> Linalg.cholSolve(low, new double[] {1.0, 2.0}));
     }
+
+    @Test
+    public void compensatedSumIsAccurate() {
+        double[] xs = new double[101];
+        java.util.Arrays.fill(xs, 1e-16);
+        xs[0] = 1.0;
+        assertEquals(1.0 + 1e-14, Linalg.kahanSum(xs), 1e-18);
+        double[] halves = new double[1250];
+        java.util.Arrays.fill(halves, 0.5);
+        assertEquals(625.0, Linalg.kahanSum(halves), 0.0);
+        assertEquals(0.0, Linalg.kahanSum(new double[0]), 0.0);
+    }
 }

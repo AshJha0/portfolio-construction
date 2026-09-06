@@ -86,41 +86,13 @@ TEST(Linalg, NonSquareAndNaNAreRejected) {
   EXPECT_THROW(portopt::check_square_symmetric(a), std::invalid_argument);
 }
 
-TEST(Linalg, ReferenceParityReductionsAgreeOnExactData) {
-  // On exactly-representable inputs every reduction order gives the same
-  // value, so the parity kernels must agree with the plain ones there.
-  const Vector a{1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0};
-  const Vector b{0.5, 0.25, 0.125, 0.0625, 2.0, 4.0, 8.0, 16.0};
-  EXPECT_DOUBLE_EQ(portopt::fma_dot(a, b), portopt::dot(a, b));
-  EXPECT_DOUBLE_EQ(portopt::blas_dot(a, b), portopt::dot(a, b));
-  EXPECT_DOUBLE_EQ(portopt::np_sum(a), 255.0);
-  // np_sum spans all three regimes (naive < 8, unrolled <= 128, recursive).
-  for (std::size_t n : {3u, 8u, 40u, 128u, 129u, 1250u}) {
-    const Vector ones(n, 1.0);
-    EXPECT_DOUBLE_EQ(portopt::np_sum(ones), static_cast<double>(n)) << n;
-  }
-  // blas_dot spans the block-splitting regimes (<= 384, (384, 768), >= 768).
-  for (std::size_t n : {10u, 384u, 500u, 768u, 1250u}) {
-    const Vector ones(n, 1.0);
-    EXPECT_DOUBLE_EQ(portopt::blas_dot(ones, ones), static_cast<double>(n)) << n;
-  }
+TEST(Linalg, CompensatedSumIsAccurate) {
+  // 1 + 100 * 1e-16 accumulated naively loses mass; Neumaier keeps it.
+  Vector xs(101, 1e-16);
+  xs[0] = 1.0;
+  EXPECT_NEAR(portopt::kahan_sum(xs), 1.0 + 1e-14, 1e-18);
   EXPECT_DOUBLE_EQ(portopt::kahan_sum(Vector(1250, 0.5)), 625.0);
-}
-
-TEST(Linalg, ParityMatVecKernelsMatchPlainProducts) {
-  const Matrix m = testdata::sigma_ann();
-  const Vector w(m.rows(), 0.125);
-  const Vector plain = portopt::mat_vec(m, w);
-  const Vector mv = portopt::np_matvec(m, w);
-  // Symmetric matrix: the row and column products agree mathematically.
-  const Vector vm = portopt::np_vecmat(w, m);
-  ASSERT_EQ(mv.size(), plain.size());
-  for (std::size_t i = 0; i < plain.size(); ++i) {
-    EXPECT_NEAR(mv[i], plain[i], 1e-15) << i;
-    EXPECT_NEAR(vm[i], plain[i], 1e-15) << i;
-  }
-  EXPECT_THROW(portopt::np_matvec(m, Vector{1.0, 2.0}), std::invalid_argument);
-  EXPECT_THROW(portopt::np_vecmat(Vector{1.0, 2.0}, m), std::invalid_argument);
+  EXPECT_DOUBLE_EQ(portopt::kahan_sum(Vector{}), 0.0);
 }
 
 TEST(Linalg, CholSolveRejectsBadRhsLength) {

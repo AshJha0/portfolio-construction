@@ -24,10 +24,12 @@ import java.util.List;
  * <p>Limits (tested): tau to 0 at fixed Omega gives mu_post to pi and M to 0;
  * Omega to infinity (zero confidence) gives mu_post to pi and M to tau Sigma.
  *
- * <p>Omega default (Idzorek-style): {@code Omega = diag(P (tau Sigma) P')}
- * scaled per view by a confidence c_k &gt; 0:
- * {@code Omega_kk = [P tau S P']_kk / c_k} (c_k to infinity: dogmatic view;
- * c_k to 0: view ignored).
+ * <p>Omega default (He &amp; Litterman 1999, scaled by a confidence divisor):
+ * {@code Omega = diag(P (tau Sigma) P')} with each entry divided by a per-view
+ * confidence c_k &gt; 0: {@code Omega_kk = [P tau S P']_kk / c_k} (c_k to
+ * infinity: dogmatic view; c_k to 0: view ignored). This is <em>not</em>
+ * Idzorek's (2005) calibration, which solves for Omega such that the
+ * posterior tilt is a stated fraction of the full-confidence tilt.
  */
 public final class BlackLitterman {
 
@@ -39,7 +41,7 @@ public final class BlackLitterman {
      *
      * <p>Type "absolute": P row is the unit vector of {@code asset}. Type
      * "relative": P row is +1 on {@code longAsset} and -1 on {@code shortAsset}.
-     * {@code confidence} must be positive (1 = default Idzorek scaling).
+     * {@code confidence} must be positive (1 = the plain He-Litterman Omega).
      *
      * @param type       "absolute" or "relative"
      * @param asset      asset name for an absolute view (null otherwise)
@@ -149,12 +151,19 @@ public final class BlackLitterman {
      * Builds (P, Q, confidences) from a list of views.
      *
      * @param views      non-empty view list
-     * @param assetNames universe asset names, in column order
+     * @param assetNames universe asset names, in column order (non-empty, unique)
      * @return the pick matrix, view returns and confidences
-     * @throws IllegalArgumentException on an empty list, unknown view type,
-     *         unknown asset name, or non-positive/non-finite q or confidence
+     * @throws IllegalArgumentException on an empty view or asset list, duplicate
+     *         asset names, unknown view type, unknown asset name, a relative
+     *         view whose legs coincide, or non-finite q / non-positive confidence
      */
     public static ViewMatrices viewsToMatrices(List<View> views, List<String> assetNames) {
+        if (assetNames == null || assetNames.isEmpty()) {
+            throw new IllegalArgumentException("asset_names must be non-empty");
+        }
+        if (new java.util.HashSet<>(assetNames).size() != assetNames.size()) {
+            throw new IllegalArgumentException("asset_names contains duplicates");
+        }
         if (views == null || views.isEmpty()) {
             throw new IllegalArgumentException("views list must be non-empty");
         }
@@ -169,8 +178,14 @@ public final class BlackLitterman {
             if ("absolute".equals(type)) {
                 p[i][nameIndex(assetNames, view.asset())] = 1.0;
             } else if ("relative".equals(type)) {
-                p[i][nameIndex(assetNames, view.longAsset())] = 1.0;
-                p[i][nameIndex(assetNames, view.shortAsset())] = -1.0;
+                int iLong = nameIndex(assetNames, view.longAsset());
+                int iShort = nameIndex(assetNames, view.shortAsset());
+                if (iLong == iShort) {
+                    throw new IllegalArgumentException(
+                            "view " + i + ": relative view: long and short legs must differ");
+                }
+                p[i][iLong] = 1.0;
+                p[i][iShort] = -1.0;
             } else {
                 throw new IllegalArgumentException("unknown view type: " + type);
             }
@@ -226,7 +241,7 @@ public final class BlackLitterman {
     }
 
     /**
-     * Idzorek-style default view covariance
+     * He-Litterman default view covariance scaled by a confidence divisor:
      * {@code Omega = diag(P (tau Sigma) P')} with each diagonal entry divided by
      * the corresponding per-view confidence ({@code c_k > 0}; null means all 1).
      *
@@ -267,7 +282,7 @@ public final class BlackLitterman {
 
     /**
      * Black-Litterman posterior via the pinned master formula with the default
-     * (Idzorek-style) Omega built from per-view confidences.
+     * (He-Litterman) Omega built from per-view confidences.
      *
      * @param sigma       SPD covariance
      * @param pi          prior (equilibrium) returns
@@ -295,8 +310,10 @@ public final class BlackLitterman {
      * @param tau         uncertainty scaling in (0, 1]
      * @param omega       view covariance, or null for the default of
      *                    {@link #defaultOmega}
-     * @param confidences per-view confidences used only when {@code omega} is
-     *                    null (null means all 1)
+     * @param confidences per-view confidences for the default Omega (null means
+     *                    all 1); passing both {@code omega} and confidences is
+     *                    an error, since the confidences only parametrize the
+     *                    default Omega
      * @return the posterior (mu_post, Sigma_post, M, Omega)
      */
     public static Result blPosterior(double[][] sigma, double[] pi, double[][] p, double[] q,
@@ -326,6 +343,10 @@ public final class BlackLitterman {
         if (omega == null) {
             om = defaultOmega(s, pm, t, confidences);
         } else {
+            if (confidences != null) {
+                throw new IllegalArgumentException(
+                        "confidences are only used with the default Omega; pass one or the other");
+            }
             om = Linalg.checkSquareSymmetric(omega);
             if (om.length != k) {
                 throw new IllegalArgumentException("Omega must be " + k + " x " + k);
@@ -356,7 +377,7 @@ public final class BlackLitterman {
             muPost[j] = pi[j] + acc;
         }
 
-        // M = tau S - B' A_k^-1 B, via n column solves against B's columns.
+        // M = tau S - B' A_k^-1 B: A_k^-1 B via n solves, one per column of B.
         double[][] ainvB = new double[k][n];
         double[] col = new double[k];
         for (int j = 0; j < n; j++) {
@@ -402,8 +423,31 @@ public final class BlackLitterman {
      */
     public static double[] blWeights(double[][] sigma, double[] pi, double[][] p, double[] q,
             double tau, double[] confidences) {
-        Result res = blPosterior(sigma, pi, p, q, tau, null, confidences);
-        return Markowitz.tangencyWeights(res.muPost(), res.sigmaPost(), 0.0);
+        return blWeights(sigma, pi, p, q, tau, 0.0, null, confidences);
+    }
+
+    /**
+     * Posterior-based optimal weights with an explicit risk-free rate and an
+     * optional explicit Omega (same surface as the Python reference).
+     *
+     * @param sigma       SPD covariance
+     * @param pi          prior (equilibrium) returns
+     * @param p           pick matrix
+     * @param q           view returns
+     * @param tau         uncertainty scaling in (0, 1]
+     * @param rf          risk-free rate for the tangency (finite; pinned default 0)
+     * @param omega       view covariance, or null for the default Omega
+     * @param confidences per-view confidences for the default Omega, or null;
+     *                    must be null when {@code omega} is given
+     * @return the BL optimal weights (tangency at rf on the posterior)
+     */
+    public static double[] blWeights(double[][] sigma, double[] pi, double[][] p, double[] q,
+            double tau, double rf, double[][] omega, double[] confidences) {
+        if (!Double.isFinite(rf)) {
+            throw new IllegalArgumentException("rf must be finite");
+        }
+        Result res = blPosterior(sigma, pi, p, q, tau, omega, confidences);
+        return Markowitz.tangencyWeights(res.muPost(), res.sigmaPost(), rf);
     }
 
     private static double[][] scale(double[][] a, double factor) {

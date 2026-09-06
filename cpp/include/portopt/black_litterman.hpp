@@ -17,9 +17,12 @@
 /// mu_post -> pi and M -> 0; Omega -> inf (zero confidence) gives
 /// mu_post -> pi and M -> tau Sigma.
 ///
-/// Omega default (Idzorek-style): Omega = diag(P (tau Sigma) P') scaled
-/// per view by a confidence c_k > 0: Omega_kk = [P tau S P']_kk / c_k
-/// (c_k -> inf: dogmatic view; c_k -> 0: view ignored).
+/// Omega default (He & Litterman 1999, scaled by a confidence divisor):
+/// Omega = diag(P (tau Sigma) P') with each entry divided by a per-view
+/// confidence c_k > 0: Omega_kk = [P tau S P']_kk / c_k (c_k -> inf:
+/// dogmatic view; c_k -> 0: view ignored). This is *not* Idzorek's (2005)
+/// calibration, which solves for Omega such that the posterior tilt is a
+/// stated fraction of the full-confidence tilt.
 #pragma once
 
 #include <string>
@@ -57,12 +60,13 @@ Vector implied_equilibrium_returns(const Matrix& sigma, const Vector& w_mkt,
 /// Build (P, Q, confidences) from view structs: an absolute view's P row
 /// is the unit vector of its asset; a relative view's P row is +1 on the
 /// long leg and -1 on the short leg.
-/// \throws std::invalid_argument on empty views, unknown type/asset name,
-///   or non-positive/non-finite confidence.
+/// \throws std::invalid_argument on empty views or asset names, duplicate
+///   asset names, unknown type/asset name, a relative view whose legs
+///   coincide, non-finite q, or non-positive/non-finite confidence.
 ViewMatrices views_to_matrices(const std::vector<View>& views,
                                const std::vector<std::string>& asset_names);
 
-/// Idzorek-style default view covariance:
+/// He-Litterman default view covariance scaled by a confidence divisor:
 /// Omega = diag(P (tau Sigma) P') with each diagonal entry divided by the
 /// corresponding per-view confidence c_k > 0 (empty vector = all 1).
 Matrix default_omega(const Matrix& sigma, const Matrix& p, double tau,
@@ -85,7 +89,9 @@ BLResult bl_posterior(const Matrix& sigma, const Vector& pi, const Matrix& p,
                       const Vector& q, double tau,
                       const Vector& confidences = Vector());
 
-/// Posterior with an explicitly supplied view covariance Omega.
+/// Posterior with an explicitly supplied view covariance Omega (the
+/// confidences of bl_posterior only parametrize the default Omega, so the
+/// two are never combined).
 BLResult bl_posterior_with_omega(const Matrix& sigma, const Vector& pi, const Matrix& p,
                                  const Vector& q, double tau, const Matrix& omega);
 
@@ -97,5 +103,11 @@ BLResult bl_posterior_with_omega(const Matrix& sigma, const Vector& pi, const Ma
 Vector bl_weights(const Matrix& sigma, const Vector& pi, const Matrix& p,
                   const Vector& q, double tau, double rf = 0.0,
                   const Vector& confidences = Vector(), BLResult* result = nullptr);
+
+/// Posterior-based optimal weights with an explicit Omega (same pinned
+/// tangency as bl_weights).
+Vector bl_weights_with_omega(const Matrix& sigma, const Vector& pi, const Matrix& p,
+                             const Vector& q, double tau, const Matrix& omega,
+                             double rf = 0.0, BLResult* result = nullptr);
 
 }  // namespace portopt

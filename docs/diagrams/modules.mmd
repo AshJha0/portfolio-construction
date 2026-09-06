@@ -8,6 +8,7 @@ classDiagram
         PIVOT_RTOL = 1e-13
     }
     class estimators {
+        +validate_returns(X)
         +sample_mean(X) mu
         +sample_cov(X) S
         +shrink_covariance(X) ShrinkageResult
@@ -18,12 +19,14 @@ classDiagram
         +two_fund_scalars(mu, S) TwoFundScalars
         +min_variance_weights(S) w
         +tangency_weights(mu, S, rf) w
+        +gross_leverage(w)
         +frontier_weights(mu, S, m) w
         +efficient_frontier(mu, S, 25)
         +project_simplex_box(v, total, lb, ub) w
-        +pgd_minimize(f, grad, proj, w0)
-        +min_variance_longonly(S, lb, ub) w
-        +constrained_frontier(mu, S, 25)
+        +attainable_return_range(mu, lb, ub)
+        +min_variance_longonly_solve(S, lb, ub) QpResult
+        +constrained_frontier_solve(mu, S, m, lb, ub) QpResult
+        +constrained_frontier(mu, S, 25, lb, ub)
     }
     class black_litterman {
         +implied_equilibrium_returns(S, w_mkt, delta) pi
@@ -50,6 +53,12 @@ classDiagram
         c
         d
     }
+    class QpResult {
+        weights
+        iterations
+        converged
+        kkt_residual
+    }
     class ShrinkageResult {
         sigma
         intensity
@@ -72,13 +81,13 @@ classDiagram
         avg_turnover
     }
 
-    estimators --> linalg : PSD gate
     markowitz --> linalg : all Sigma^-1 x
     black_litterman --> linalg : k x k solve
     black_litterman --> markowitz : posterior tangency
     risk_parity --> linalg : SPD gate
     backtest --> estimators : validation
     markowitz ..> TwoFundScalars
+    markowitz ..> QpResult
     estimators ..> ShrinkageResult
     black_litterman ..> BLResult
     backtest ..> BacktestResult

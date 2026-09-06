@@ -15,7 +15,8 @@ package com.quant.portopt;
  *   <li>SPD inverse: column-by-column Cholesky solves against identity columns
  *       (no post-symmetrization).</li>
  * </ul>
- * All loops are explicit so the operation order is pinned.
+ * All loops are explicit so the operation order is pinned. Long (T-length)
+ * reductions use {@link #kahanSum}; every other sum is plain sequential.
  */
 public final class Linalg {
 
@@ -200,152 +201,63 @@ public final class Linalg {
 
     // ------------------------------------------------------------------
     // Small dense helpers shared by the package (row-major, explicit loops).
-    //
-    // These reductions replicate, operation for operation, what the Python
-    // reference actually executes (numpy 2.x backed by OpenBLAS on an AVX-512
-    // host). That matters because the PGD golden values (API_SPEC 3.6) pin the
-    // exact iterate of a fixed-point iteration whose stopping point is
-    // sensitive to sub-ulp rounding: reproducing them to 1e-8 requires the
-    // same floating-point reduction trees, not merely "accurate" ones.
     // ------------------------------------------------------------------
 
-    /**
-     * Dot product of two equal-length vectors: sequential fused multiply-add
-     * ({@code s = fma(a_i, b_i, s)}), matching BLAS ddot for small n as used
-     * by numpy's {@code x @ y}.
-     */
+    /** Plain left-to-right dot product of two equal-length vectors. */
     static double dot(double[] a, double[] b) {
         double s = 0.0;
         for (int i = 0; i < a.length; i++) {
-            s = Math.fma(a[i], b[i], s);
+            s += a[i] * b[i];
         }
         return s;
     }
 
-    /**
-     * One row-times-vector reduction of the matrix-vector product
-     * {@code a @ v}: four FMA accumulator lanes assigned round-robin
-     * ({@code lane = j % 4}), combined as {@code (l0+l2) + (l1+l3)} —
-     * the dgemv_t microkernel numpy dispatches to for {@code A @ x}.
-     */
-    static double rowDot(double[] row, double[] v) {
-        double l0 = 0.0;
-        double l1 = 0.0;
-        double l2 = 0.0;
-        double l3 = 0.0;
-        int n = row.length;
-        for (int j = 0; j < n; j += 4) {
-            l0 = Math.fma(row[j], v[j], l0);
-            if (j + 1 < n) {
-                l1 = Math.fma(row[j + 1], v[j + 1], l1);
-            }
-            if (j + 2 < n) {
-                l2 = Math.fma(row[j + 2], v[j + 2], l2);
-            }
-            if (j + 3 < n) {
-                l3 = Math.fma(row[j + 3], v[j + 3], l3);
-            }
-        }
-        return (l0 + l2) + (l1 + l3);
-    }
-
-    /** Matrix-vector product {@code a @ v} via {@link #rowDot} per row. */
+    /** Matrix-vector product {@code a v} with plain sequential row sums. */
     static double[] matVec(double[][] a, double[] v) {
-        int rows = a.length;
-        double[] out = new double[rows];
-        for (int i = 0; i < rows; i++) {
-            out[i] = rowDot(a[i], v);
+        double[] out = new double[a.length];
+        for (int i = 0; i < a.length; i++) {
+            out[i] = dot(a[i], v);
         }
         return out;
     }
 
-    /**
-     * Vector-matrix product {@code v @ a} (numpy's dgemv_n path). Per output
-     * column, rows are consumed in blocks of four with the microkernel's
-     * quirky order — the second row's product seeds the block, then rows
-     * 0, 2, 3 join by FMA — and block sums are added sequentially:
-     *
-     * <pre>S_b = fma(a3,v3, fma(a2,v2, fma(a0,v0, a1*v1))); out += S_b</pre>
-     */
-    static double[] vecMat(double[] v, double[][] a) {
-        int n = v.length;
-        int cols = a[0].length;
-        double[] out = new double[cols];
-        int full = n - (n % 4);
-        for (int j = 0; j < cols; j++) {
-            double acc = 0.0;
-            for (int b = 0; b < full; b += 4) {
-                double s = v[b + 1] * a[b + 1][j];
-                s = Math.fma(v[b], a[b][j], s);
-                s = Math.fma(v[b + 2], a[b + 2][j], s);
-                s = Math.fma(v[b + 3], a[b + 3][j], s);
-                acc = acc + s;
-            }
-            int rem = n - full;
-            if (rem >= 2) {
-                acc = acc + Math.fma(v[full + 1], a[full + 1][j], v[full] * a[full][j]);
-            }
-            if (rem % 2 == 1) {
-                acc = acc + v[n - 1] * a[n - 1][j];
-            }
-            out[j] = acc;
-        }
-        return out;
-    }
-
-    /**
-     * Sum of vector entries with numpy's pairwise algorithm: sequential below
-     * 8 elements; eight interleaved accumulators combined pairwise up to 128;
-     * recursive halving (aligned to multiples of 8) above.
-     */
-    static double sum(double[] a) {
-        return pairwiseSum(a, 0, a.length);
-    }
-
-    private static double pairwiseSum(double[] a, int off, int n) {
-        if (n < 8) {
-            double s = 0.0;
-            for (int i = 0; i < n; i++) {
-                s += a[off + i];
-            }
-            return s;
-        }
-        if (n <= 128) {
-            double r0 = a[off];
-            double r1 = a[off + 1];
-            double r2 = a[off + 2];
-            double r3 = a[off + 3];
-            double r4 = a[off + 4];
-            double r5 = a[off + 5];
-            double r6 = a[off + 6];
-            double r7 = a[off + 7];
-            int i = 8;
-            for (; i + 8 <= n; i += 8) {
-                r0 += a[off + i];
-                r1 += a[off + i + 1];
-                r2 += a[off + i + 2];
-                r3 += a[off + i + 3];
-                r4 += a[off + i + 4];
-                r5 += a[off + i + 5];
-                r6 += a[off + i + 6];
-                r7 += a[off + i + 7];
-            }
-            double s = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7));
-            for (; i < n; i++) {
-                s += a[off + i];
-            }
-            return s;
-        }
-        int n2 = n / 2;
-        n2 -= n2 % 8;
-        return pairwiseSum(a, off, n2) + pairwiseSum(a, off + n2, n - n2);
-    }
-
-    /**
-     * Quadratic form {@code w' a w}, evaluated exactly as the Python reference
-     * writes it: {@code (w @ a) @ w} — vector-matrix product first, then a dot.
-     */
+    /** Quadratic form {@code w' a w}. */
     static double quadForm(double[] w, double[][] a) {
-        return dot(vecMat(w, a), w);
+        return dot(w, matVec(a, w));
+    }
+
+    /**
+     * Sum of a vector with Neumaier compensation (a Kahan variant that also
+     * handles terms larger than the running sum). Used for every T-length
+     * reduction (means, covariances, shrinkage dispersion sums, backtest
+     * metrics): the Python reference sums with correctly rounded
+     * {@code math.fsum}, and the compensated sum agrees with it to a couple
+     * of ulps, so no golden value depends on a BLAS or a summation order.
+     *
+     * @param a terms (an empty array sums to 0)
+     * @return the compensated sum
+     */
+    public static double kahanSum(double[] a) {
+        double sum = 0.0;
+        double c = 0.0;
+        for (double x : a) {
+            double t = sum + x;
+            if (Math.abs(sum) >= Math.abs(x)) {
+                c += (sum - t) + x;
+            } else {
+                c += (x - t) + sum;
+            }
+            sum = t;
+        }
+        return sum + c;
+    }
+
+    /** Plain sequential sum of a short vector. */
+    static double sum(double[] a) {
+        double s = 0.0;
+        for (double x : a) {
+            s += x;
+        }
+        return s;
     }
 }

@@ -47,7 +47,7 @@ BLParts bl_parts() {
 
 }  // namespace
 
-TEST(Golden, CaseCount) { EXPECT_GE(testdata::golden().size(), 20u); }
+TEST(Golden, CaseCount) { EXPECT_EQ(testdata::golden().size(), 23u); }
 
 TEST(Golden, SampleMomentsDaily) {
   const auto& c = golden_case("sample_moments_daily");
@@ -101,6 +101,7 @@ TEST(Golden, TangencyUnconstrained) {
   const double var = portopt::dot(w, portopt::mat_vec(testdata::sigma_ann(), w));
   const double sharpe = (portopt::dot(testdata::mu_ann(), w) - rf) / std::sqrt(var);
   EXPECT_NEAR(sharpe, c.expect.at("sharpe"), c.tol);
+  EXPECT_NEAR(portopt::gross_leverage(w), c.expect.at("gross_leverage"), c.tol);
 }
 
 TEST(Golden, FrontierPointT080) {
@@ -112,18 +113,47 @@ TEST(Golden, FrontierPointT080) {
   EXPECT_NEAR(var, c.expect.at("variance"), c.tol);
 }
 
-TEST(Golden, MinVarLongOnlyPgd) {
-  const auto& c = golden_case("minvar_longonly_pgd");
+TEST(Golden, MinVarLongOnlyQp) {
+  const auto& c = golden_case("minvar_longonly_qp");
+  const portopt::QpResult res = portopt::min_variance_longonly_solve(testdata::sigma_ann());
+  EXPECT_TRUE(res.converged);
+  expect_vec_near(res.weights, golden_vec(c.expect, "w"), c.tol, "minvar long-only w");
   const Vector w = portopt::min_variance_longonly(testdata::sigma_ann());
-  expect_vec_near(w, golden_vec(c.expect, "w"), c.tol, "minvar long-only w");
+  EXPECT_NEAR(portopt::dot(w, portopt::mat_vec(testdata::sigma_ann(), w)),
+              c.expect.at("variance"), c.tol);
+}
+
+TEST(Golden, MinVarBoxQp) {
+  const auto& c = golden_case("minvar_box_qp");
+  const std::size_t n = testdata::sigma_ann().rows();
+  const Vector w = portopt::min_variance_longonly(
+      testdata::sigma_ann(), Vector(n, c.inputs.at("lb")), Vector(n, c.inputs.at("ub")));
+  expect_vec_near(w, golden_vec(c.expect, "w"), c.tol, "minvar box w");
+  EXPECT_NEAR(portopt::dot(w, portopt::mat_vec(testdata::sigma_ann(), w)),
+              c.expect.at("variance"), c.tol);
 }
 
 TEST(Golden, FrontierConstrainedT080) {
   const auto& c = golden_case("frontier_constrained_t080");
+  const portopt::QpResult res = portopt::constrained_frontier_solve(
+      testdata::mu_ann(), testdata::sigma_ann(), c.inputs.at("target"));
+  EXPECT_TRUE(res.converged);
+  expect_vec_near(res.weights, golden_vec(c.expect, "w"), c.tol, "constrained frontier w");
+  EXPECT_NEAR(portopt::dot(res.weights, portopt::mat_vec(testdata::sigma_ann(), res.weights)),
+              c.expect.at("variance"), c.tol);
+  EXPECT_NEAR(portopt::dot(testdata::mu_ann(), res.weights), c.inputs.at("target"), 1e-12);
+}
+
+TEST(Golden, FrontierConstrainedBoxT060) {
+  const auto& c = golden_case("frontier_constrained_box_t060");
+  const std::size_t n = testdata::sigma_ann().rows();
   const Vector w = portopt::constrained_frontier_weights(
       testdata::mu_ann(), testdata::sigma_ann(), c.inputs.at("target"),
-      c.inputs.at("penalty"));
-  expect_vec_near(w, golden_vec(c.expect, "w"), c.tol, "constrained frontier w");
+      Vector(n, c.inputs.at("lb")), Vector(n, c.inputs.at("ub")));
+  expect_vec_near(w, golden_vec(c.expect, "w"), c.tol, "constrained frontier box w");
+  EXPECT_NEAR(portopt::dot(w, portopt::mat_vec(testdata::sigma_ann(), w)),
+              c.expect.at("variance"), c.tol);
+  EXPECT_NEAR(portopt::dot(testdata::mu_ann(), w), c.inputs.at("target"), 1e-12);
 }
 
 TEST(Golden, CholeskyAnnualizedCov) {
@@ -247,4 +277,25 @@ TEST(Golden, TurnoverMinVarLongOnly) {
   EXPECT_NEAR(r.avg_turnover, c.expect.at("avg_turnover"), c.tol);
   EXPECT_NEAR(static_cast<double>(r.rebalance_dates.size()),
               c.expect.at("n_rebalances"), c.tol);
+}
+
+TEST(Golden, QpGoldensAreInputStable) {
+  // Scaling the returns by (1 + 2^-52) moves the QP goldens by far less than
+  // their tolerance: the solver is an exact function of the active set.
+  const Matrix& x = testdata::returns_data().returns;
+  Matrix x2(x.rows(), x.cols());
+  for (std::size_t r = 0; r < x.rows(); ++r) {
+    for (std::size_t c = 0; c < x.cols(); ++c) x2(r, c) = x(r, c) * (1.0 + std::ldexp(1.0, -52));
+  }
+  const auto& c = golden_case("minvar_longonly_qp");
+  const Vector w = portopt::min_variance_longonly(portopt::annualize_cov(portopt::sample_cov(x2)));
+  expect_vec_near(w, golden_vec(c.expect, "w"), 1e-13, "ulp-scaled minvar w");
+  const auto& ct = golden_case("turnover_minvar_longonly");
+  const portopt::BacktestResult r = portopt::run_backtest(
+      x2,
+      [](const Matrix& h) {
+        return portopt::min_variance_longonly(portopt::annualize_cov(portopt::sample_cov(h)));
+      },
+      0.0, 500, 63);
+  EXPECT_NEAR(r.avg_turnover, ct.expect.at("avg_turnover"), 1e-12);
 }

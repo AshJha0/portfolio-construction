@@ -18,7 +18,9 @@ struct ReturnsData {
 };
 
 /// Read data/asset_returns.csv: a header row of asset names followed by
-/// rows of comma-separated daily simple returns.
+/// rows of comma-separated daily simple returns. Parsing is
+/// locale-independent (std::from_chars) and tolerates CRLF line endings
+/// and surrounding whitespace.
 /// \throws std::runtime_error if the file cannot be read or is malformed.
 ReturnsData load_returns_csv(const std::string& path);
 
@@ -50,7 +52,6 @@ struct Config {
   int estimation_window = 500;
   int rebalance_step = 63;
   int frontier_points = 25;
-  double frontier_penalty = 1.0e4;
 };
 
 /// Read data/config.json.

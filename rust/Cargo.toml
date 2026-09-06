@@ -2,7 +2,7 @@
 name = "portopt"
 version = "1.0.0"
 edition = "2021"
-description = "Portfolio construction: Markowitz, Black-Litterman, risk parity (P10 reference port)"
+description = "Portfolio construction: Markowitz, Black-Litterman, risk parity (portfolio-construction reference port)"
 license = "MIT"
 
 [dependencies]

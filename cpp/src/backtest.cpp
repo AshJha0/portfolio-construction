@@ -20,30 +20,45 @@ void validate_series(const Vector& r, std::size_t min_len) {
     if (!std::isfinite(v)) {
       throw std::invalid_argument("return series contains NaN or infinite entries");
     }
+    if (v <= -1.0) {
+      throw std::invalid_argument(
+          "return series contains a simple return <= -1 (-100% or worse)");
+    }
   }
 }
 
-/// numpy-order pairwise sum (np_sum): the metric golden values are
-/// defined on the reference's `np.mean`/`np.sum` accumulation order.
-double series_sum(const Vector& r) { return np_sum(r); }
+void validate_periods(int periods) {
+  if (periods <= 0) throw std::invalid_argument("periods must be positive and finite");
+}
+
+void validate_rf(double rf) {
+  if (!std::isfinite(rf)) throw std::invalid_argument("rf must be finite");
+}
+
+/// Compensated sum: matches the reference's correctly rounded math.fsum
+/// to a couple of ulps.
+double series_sum(const Vector& r) { return kahan_sum(r); }
 
 }  // namespace
 
 double annualized_return(const Vector& r, int periods) {
+  validate_periods(periods);
   validate_series(r, 1);
   return static_cast<double>(periods) * series_sum(r) / static_cast<double>(r.size());
 }
 
 double annualized_vol(const Vector& r, int periods) {
+  validate_periods(periods);
   validate_series(r, 2);
   const double mu = series_sum(r) / static_cast<double>(r.size());
-  double acc = 0.0;
-  for (double v : r) acc += (v - mu) * (v - mu);
-  const double var = acc / static_cast<double>(r.size() - 1);
+  Vector sq(r.size(), 0.0);
+  for (std::size_t i = 0; i < r.size(); ++i) sq[i] = (r[i] - mu) * (r[i] - mu);
+  const double var = series_sum(sq) / static_cast<double>(r.size() - 1);
   return std::sqrt(static_cast<double>(periods)) * std::sqrt(var);
 }
 
 double sharpe_ratio(const Vector& r, double rf, int periods) {
+  validate_rf(rf);
   const double vol = annualized_vol(r, periods);
   if (vol < 1e-15) {
     throw std::domain_error("Sharpe undefined: portfolio volatility is zero");
@@ -74,9 +89,12 @@ std::vector<std::size_t> rebalance_indices(std::size_t t, int window, int step) 
     throw std::invalid_argument(msg.str());
   }
   std::vector<std::size_t> out;
-  for (std::size_t tk = static_cast<std::size_t>(window); tk < t;
-       tk += static_cast<std::size_t>(step)) {
+  std::size_t tk = static_cast<std::size_t>(window);
+  while (tk < t) {
     out.push_back(tk);
+    // Overflow-safe advance: stop when the next date would be >= t.
+    if (t - tk <= static_cast<std::size_t>(step)) break;
+    tk += static_cast<std::size_t>(step);
   }
   return out;
 }
@@ -85,8 +103,16 @@ BacktestResult run_backtest(const Matrix& returns,
                             const std::function<Vector(const Matrix&)>& weight_fn,
                             double rf, int window, int step) {
   validate_returns(returns, 3);
+  validate_rf(rf);
   const std::size_t t = returns.rows();
   const std::size_t n = returns.cols();
+  if (window < 2) throw std::invalid_argument("estimation window must be >= 2");
+  if (t < static_cast<std::size_t>(window) + 2) {
+    std::ostringstream msg;
+    msg << "backtest needs at least 2 holdout days: sample length " << t
+        << " must be >= window + 2 = " << window + 2;
+    throw std::invalid_argument(msg.str());
+  }
   const std::vector<std::size_t> dates = rebalance_indices(t, window, step);
   const std::size_t k = dates.size();
   Matrix weights(k, n, 0.0);
@@ -120,10 +146,10 @@ BacktestResult run_backtest(const Matrix& returns,
     }
     for (std::size_t c = 0; c < n; ++c) weights(idx, c) = w[c];
     const std::size_t t_end = (idx + 1 < k) ? dates[idx + 1] : t;
+    Vector prod(n, 0.0);
     for (std::size_t r = t_k; r < t_end; ++r) {
-      double acc = 0.0;
-      for (std::size_t c = 0; c < n; ++c) acc += returns(r, c) * w[c];
-      port[r - static_cast<std::size_t>(window)] = acc;
+      for (std::size_t c = 0; c < n; ++c) prod[c] = returns(r, c) * w[c];
+      port[r - static_cast<std::size_t>(window)] = kahan_sum(prod);
     }
   }
   Vector turnovers;
@@ -133,7 +159,7 @@ BacktestResult run_backtest(const Matrix& returns,
     for (std::size_t c = 0; c < n; ++c) {
       diffs[c] = std::fabs(weights(i, c) - weights(i - 1, c));
     }
-    turnovers.push_back(np_sum(diffs));
+    turnovers.push_back(kahan_sum(diffs));
   }
   const double avg_to =
       turnovers.empty() ? 0.0 : series_sum(turnovers) / static_cast<double>(turnovers.size());

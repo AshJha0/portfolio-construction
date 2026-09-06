@@ -1,6 +1,7 @@
 #include "portopt/data_io.hpp"
 
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -19,18 +20,32 @@ std::string read_file(const std::string& path) {
   return buf.str();
 }
 
+/// Trim ASCII whitespace (including the '\r' of CRLF files) from both ends.
+std::string trim(const std::string& s) {
+  std::size_t b = 0;
+  std::size_t e = s.size();
+  while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+  while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+  return s.substr(b, e - b);
+}
+
 std::vector<std::string> split_csv_line(const std::string& line) {
   std::vector<std::string> out;
   std::string cell;
   std::istringstream ss(line);
-  while (std::getline(ss, cell, ',')) out.push_back(cell);
+  while (std::getline(ss, cell, ',')) out.push_back(trim(cell));
+  if (!line.empty() && line.back() == ',') out.push_back("");
   return out;
 }
 
+/// Locale-independent, correctly rounded decimal parsing (std::from_chars);
+/// the whole token must be consumed.
 double parse_double(const std::string& tok, const std::string& path) {
-  char* end = nullptr;
-  const double v = std::strtod(tok.c_str(), &end);
-  if (end == tok.c_str()) {
+  double v = 0.0;
+  const char* first = tok.data();
+  const char* last = tok.data() + tok.size();
+  const auto res = std::from_chars(first, last, v);
+  if (res.ec != std::errc() || res.ptr != last) {
     throw std::runtime_error("malformed number '" + tok + "' in " + path);
   }
   return v;
@@ -126,9 +141,11 @@ class JsonScanner {
     }
     if (pos_ == start) fail("invalid value");
     const std::string tok = text_.substr(start, pos_ - start);
-    char* end = nullptr;
-    const double v = std::strtod(tok.c_str(), &end);
-    if (end != tok.c_str() + tok.size()) fail("invalid number '" + tok + "'");
+    double v = 0.0;
+    const auto res = std::from_chars(tok.data(), tok.data() + tok.size(), v);
+    if (res.ec != std::errc() || res.ptr != tok.data() + tok.size()) {
+      fail("invalid number '" + tok + "'");
+    }
     Node n;
     n.type = Node::Type::kNumber;
     n.number = v;
@@ -186,11 +203,12 @@ ReturnsData load_returns_csv(const std::string& path) {
   std::string line;
   if (!std::getline(in, line)) throw std::runtime_error("empty returns file: " + path);
   ReturnsData out;
-  out.names = split_csv_line(line);
+  out.names = split_csv_line(trim(line));
   const std::size_t n = out.names.size();
   std::vector<double> values;
   std::size_t rows = 0;
   while (std::getline(in, line)) {
+    line = trim(line);
     if (line.empty()) continue;
     const std::vector<std::string> cells = split_csv_line(line);
     if (cells.size() != n) {
@@ -213,6 +231,7 @@ MarketCaps load_market_caps(const std::string& path) {
   if (!std::getline(in, line)) throw std::runtime_error("empty caps file: " + path);
   MarketCaps out;
   while (std::getline(in, line)) {
+    line = trim(line);
     if (line.empty()) continue;
     const std::vector<std::string> cells = split_csv_line(line);
     if (cells.size() != 2) throw std::runtime_error("malformed row in " + path);
@@ -250,7 +269,6 @@ Config load_config(const std::string& path) {
   cfg.estimation_window = static_cast<int>(doc.at("estimation_window").number);
   cfg.rebalance_step = static_cast<int>(doc.at("rebalance_step").number);
   cfg.frontier_points = static_cast<int>(doc.at("frontier_points").number);
-  cfg.frontier_penalty = doc.at("frontier_penalty").number;
   return cfg;
 }
 

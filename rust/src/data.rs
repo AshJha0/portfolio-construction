@@ -43,8 +43,6 @@ pub struct Config {
     pub rebalance_step: usize,
     /// Number of frontier sweep points.
     pub frontier_points: usize,
-    /// Quadratic penalty for the constrained frontier.
-    pub frontier_penalty: f64,
 }
 
 fn read_to_string(path: &Path) -> Result<String> {

@@ -170,6 +170,57 @@ public class BlackLittermanTest {
     }
 
     @Test
+    public void relativeViewSameLegsRejected() {
+        // PT-7 (MAJ-2): long == short must not become a silent absolute short view.
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.viewsToMatrices(
+                List.of(BlackLitterman.View.relative("US_EQ", "US_EQ", 0.02, 1.0)),
+                TestData.assetNames()));
+    }
+
+    @Test
+    public void viewsParseErrorPaths() {
+        // PT-11: NaN q, duplicate names, empty names; missing confidence -> 1.
+        List<String> names = TestData.assetNames();
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.viewsToMatrices(
+                List.of(BlackLitterman.View.absolute("US_EQ", Double.NaN, 1.0)), names));
+        List<String> dup = new java.util.ArrayList<>(names);
+        dup.add("US_EQ");
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.viewsToMatrices(
+                List.of(BlackLitterman.View.absolute("US_EQ", 0.1, 1.0)), dup));
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.viewsToMatrices(
+                List.of(BlackLitterman.View.absolute("US_EQ", 0.1, 1.0)), List.of()));
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.viewsToMatrices(
+                List.of(BlackLitterman.View.relative("US_EQ", "NOPE", 0.1, 1.0)), names));
+    }
+
+    @Test
+    public void omegaAndConfidencesTogetherRejectedAndLeverage() {
+        // MIN-12: explicit Omega plus confidences would silently ignore the latter.
+        BlackLitterman.ViewMatrices vm = vm();
+        double tau = (Double) TestData.viewsDoc().get("tau");
+        double[] p = pi();
+        double[][] omega = BlackLitterman.defaultOmega(
+                TestData.sigmaAnnualized(), vm.p(), tau, vm.confidences());
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.blPosterior(
+                TestData.sigmaAnnualized(), p, vm.p(), vm.q(), tau, omega, vm.confidences()));
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.blWeights(
+                TestData.sigmaAnnualized(), p, vm.p(), vm.q(), tau, 0.0, omega, vm.confidences()));
+        assertThrows(IllegalArgumentException.class, () -> BlackLitterman.blWeights(
+                TestData.sigmaAnnualized(), p, vm.p(), vm.q(), tau, Double.NaN, null, vm.confidences()));
+        BlackLitterman.Result a = BlackLitterman.blPosterior(
+                TestData.sigmaAnnualized(), p, vm.p(), vm.q(), tau, omega, null);
+        BlackLitterman.Result b = BlackLitterman.blPosterior(
+                TestData.sigmaAnnualized(), p, vm.p(), vm.q(), tau, vm.confidences());
+        assertArrayEquals(a.muPost(), b.muPost(), 1e-16);
+        double[] wA = BlackLitterman.blWeights(
+                TestData.sigmaAnnualized(), p, vm.p(), vm.q(), tau, 0.0, omega, null);
+        double[] wB = BlackLitterman.blWeights(
+                TestData.sigmaAnnualized(), p, vm.p(), vm.q(), tau, vm.confidences());
+        assertArrayEquals(wA, wB, 1e-15);
+        assertTrue("posterior shorts EU_EQ", Markowitz.grossLeverage(wB) > 1.0);
+    }
+
+    @Test
     public void errorPaths() {
         List<String> names = TestData.assetNames();
         double[][] sig = TestData.sigmaAnnualized();

@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -64,65 +65,21 @@ double dot(const Vector& a, const Vector& b);
 /// Matrix-vector product a * v (plain sequential row sums).
 Vector mat_vec(const Matrix& a, const Vector& v);
 
-// ---------------------------------------------------------------------------
-// Reference-parity reductions.
-//
-// The pinned PGD golden cases are ulp-sensitive: the iterate stops a few
-// 1e-8 from the exact minimizer along a low-curvature direction, and the
-// pinned turnover value (tol 1e-10) is a function of that stopping point.
-// Reproducing them therefore requires reproducing the Python reference's
-// floating-point path bit for bit, and the reference delegates its inner
-// products to numpy/OpenBLAS, whose summation orders differ from plain
-// sequential loops. The kernels below replicate those orders exactly
-// (verified against the reference BLAS); std::fma is used where the BLAS
-// kernels fuse, since it is correctly rounded.
-// ---------------------------------------------------------------------------
-
-/// Sequential fused-multiply-add dot product: s = fma(a[k], b[k], s).
-///
-/// Reproduces the OpenBLAS `ddot` result numpy produces for the short
-/// (n <= 8) vector-vector products inside the reference PGD loop; keeping
-/// those bits identical keeps the PGD trajectory identical to Python's.
-double fma_dot(const Vector& a, const Vector& b);
-
-/// OpenBLAS dgemm k-blocking constant (GEMM_Q) observed for the
-/// reference BLAS: long reduction dimensions are processed in blocks.
-constexpr std::size_t kGemmQ = 384;
-
-/// Long dot product mirroring the OpenBLAS dgemm accumulation order used
-/// by numpy's `xc.T @ xc` (the sample covariance): the k-dimension is cut
-/// greedily into blocks (a remainder >= 2*384 takes 384; a remainder in
-/// (384, 768) is halved with the first half rounded up), each block is
-/// accumulated with sequential FMA, and block partials are added left to
-/// right. Bit-exact for every window length the pinned backtest uses.
-double blas_dot(const Vector& a, const Vector& b);
-
-/// numpy-compatible pairwise summation (`np.sum` over a contiguous
-/// float64 vector): naive below 8 elements, an 8-accumulator unrolled
-/// loop with a fixed reduction tree up to 128, and a recursive halving
-/// split (rounded down to a multiple of 8) above.
-double np_sum(const double* v, std::size_t n);
-
-/// Overload of np_sum taking a Vector.
-double np_sum(const Vector& v);
-
-/// Matrix-vector product mirroring the OpenBLAS dgemv row kernel numpy
-/// uses for `Sigma @ w` (the PGD gradient): per row, four FMA
-/// accumulators striding the columns, reduced as (r0+r2) + (r1+r3).
-Vector np_matvec(const Matrix& m, const Vector& v);
-
-/// Vector-matrix product v' M mirroring numpy's `w @ Sigma` (the
-/// OpenBLAS dgemv_n SkylakeX kernel): per output column, blocks of four
-/// terms are combined as fma(m2, v2, fma(m3, v3, ...)) seeded by
-/// fma(m0, v0, m1*v1), and block sums are added one block at a time; a
-/// 2/1-column tail follows the driver's 4x2/4x1 kernels.
-Vector np_vecmat(const Vector& v, const Matrix& m);
-
-/// Neumaier-compensated sum for long (T-length) accumulations.
-///
-/// Matches numpy's pairwise summation to within a couple of ulps, keeping
-/// the T = 1250 dispersion sums inside the 1e-10 golden tolerances.
+/// Sum of a vector with Neumaier compensation (a Kahan variant that also
+/// handles terms larger than the running sum). Used for every T-length
+/// reduction (means, covariances, shrinkage dispersion sums, backtest
+/// metrics): the Python reference sums with correctly rounded `math.fsum`,
+/// and the compensated sum agrees with it to a couple of ulps, so no
+/// golden value depends on the BLAS or the summation order.
 double kahan_sum(const Vector& xs);
+
+/// Thrown when the tangency portfolio is undefined (A - rf*C <= 0) or
+/// ill-conditioned (A - rf*C within a relative kTangencyCondRtol of
+/// cancelling). Derives from std::domain_error so generic handlers still
+/// work; the demo's pinned fallback catches exactly this type.
+struct TangencyUndefinedError : std::domain_error {
+  using std::domain_error::domain_error;
+};
 
 /// Validate that \p a is a finite, square, symmetric, non-empty matrix.
 /// \throws std::invalid_argument if not square/non-empty, contains

@@ -21,10 +21,14 @@
 //! * max drawdown from wealth `V_0 = 1`, `V_t = V_{t-1} (1 + r_t)`:
 //!   `maxdd = max_t (1 - V_t / max_{s<=t} V_s)` (peak includes `V_0`),
 //!   reported as a positive fraction.
+//!
+//! Every metric rejects NaN/inf, simple returns `<= -1`, non-positive
+//! `periods` and a non-finite `rf`. Series sums use the compensated
+//! [`crate::linalg::kahan_sum`] (matches the reference's `math.fsum`).
 
 use crate::error::{PortOptError, Result};
 use crate::estimators::validate_returns;
-use crate::linalg::{dot, np_sum, Matrix};
+use crate::linalg::{kahan_sum, Matrix};
 
 /// Default expanding estimation window (trading days).
 pub const DEFAULT_WINDOW: usize = 500;
@@ -44,30 +48,62 @@ fn validate_series(r: &[f64], min_len: usize) -> Result<()> {
             "return series contains NaN or infinite entries".into(),
         ));
     }
+    if r.iter().any(|&v| v <= -1.0) {
+        return Err(PortOptError::InvalidInput(
+            "return series contains a simple return <= -1 (-100% or worse)".into(),
+        ));
+    }
     Ok(())
 }
 
-/// Arithmetic annualized return `periods * mean(r)`.
+fn validate_periods(periods: f64) -> Result<()> {
+    if !(periods > 0.0) || !periods.is_finite() {
+        return Err(PortOptError::InvalidInput(
+            "periods must be positive and finite".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rf(rf: f64) -> Result<()> {
+    if !rf.is_finite() {
+        return Err(PortOptError::InvalidInput("rf must be finite".into()));
+    }
+    Ok(())
+}
+
+/// Arithmetic annualized return `periods * mean(r)` (compensated sum).
+///
+/// # Errors
+/// [`PortOptError::InvalidInput`] on an empty/invalid series or a
+/// non-positive `periods`.
 pub fn annualized_return(r: &[f64], periods: f64) -> Result<f64> {
+    validate_periods(periods)?;
     validate_series(r, 1)?;
-    Ok(periods * np_sum(r) / r.len() as f64)
+    Ok(periods * kahan_sum(r.iter().copied()) / r.len() as f64)
 }
 
 /// Annualized volatility `sqrt(periods) * std(r, ddof=1)`.
+///
+/// # Errors
+/// [`PortOptError::InvalidInput`] on an invalid series or a non-positive
+/// `periods`.
 pub fn annualized_vol(r: &[f64], periods: f64) -> Result<f64> {
+    validate_periods(periods)?;
     validate_series(r, 2)?;
     let n = r.len() as f64;
-    let mu = np_sum(r) / n;
-    let sq: Vec<f64> = r.iter().map(|v| (v - mu) * (v - mu)).collect();
-    let var = np_sum(&sq) / (n - 1.0);
+    let mu = kahan_sum(r.iter().copied()) / n;
+    let var = kahan_sum(r.iter().map(|v| (v - mu) * (v - mu))) / (n - 1.0);
     Ok(periods.sqrt() * var.sqrt())
 }
 
 /// Annualized Sharpe `(ann_return - rf) / ann_vol`.
 ///
 /// # Errors
+/// [`PortOptError::InvalidInput`] when `rf` is not finite;
 /// [`PortOptError::Undefined`] when the annualized vol is below 1e-15.
 pub fn sharpe_ratio(r: &[f64], rf: f64, periods: f64) -> Result<f64> {
+    validate_rf(rf)?;
     let vol = annualized_vol(r, periods)?;
     if vol < 1e-15 {
         return Err(PortOptError::Undefined(
@@ -78,6 +114,9 @@ pub fn sharpe_ratio(r: &[f64], rf: f64, periods: f64) -> Result<f64> {
 }
 
 /// Maximum drawdown of the compounded wealth path (positive fraction).
+///
+/// # Errors
+/// [`PortOptError::InvalidInput`] on NaN/inf or a simple return `<= -1`.
 pub fn max_drawdown(r: &[f64]) -> Result<f64> {
     validate_series(r, 1)?;
     let mut wealth = 1.0_f64;
@@ -96,7 +135,8 @@ pub fn max_drawdown(r: &[f64]) -> Result<f64> {
     Ok(mdd)
 }
 
-/// Pinned rebalance dates `window, window+step, ...` strictly below `t`.
+/// Pinned rebalance dates `window, window+step, ...` strictly below `t`
+/// (`ceil((t - window) / step)` dates; any `step >= 1` is safe).
 ///
 /// # Errors
 /// [`PortOptError::InvalidInput`] for `window < 2`, `step < 1`, or
@@ -143,10 +183,12 @@ pub struct BacktestResult {
 
 /// Quarterly expanding-window backtest with the pinned schedule.
 ///
-/// `weight_fn(history)` receives the expanding daily-return history
-/// (rows `[0, t_k)`) and must return weights of length `n` summing to ~1
-/// (validated to 1e-6). A fallible weight function lets callers implement
-/// the pinned tangency fallback (API_SPEC 6.3) themselves.
+/// `weight_fn(history)` receives a copy of the expanding daily-return
+/// history (rows `[0, t_k)`) and must return weights of length `n`
+/// summing to 1 within 1e-6. A fallible weight function lets callers
+/// implement the pinned tangency fallback (API_SPEC 6.3) themselves.
+/// Requires `T >= window + 2` (two holdout days, so that the ddof = 1
+/// volatility exists) and a finite `rf`.
 ///
 /// # Errors
 /// Schedule/shape validation errors, a propagated `weight_fn` error, or
@@ -162,7 +204,19 @@ where
     F: FnMut(&Matrix) -> Result<Vec<f64>>,
 {
     validate_returns(returns, 3)?;
+    validate_rf(rf)?;
     let (t, n) = (returns.nrows(), returns.ncols());
+    if window < 2 {
+        return Err(PortOptError::InvalidInput(
+            "estimation window must be >= 2".into(),
+        ));
+    }
+    if t < window + 2 {
+        return Err(PortOptError::InvalidInput(format!(
+            "backtest needs at least 2 holdout days: sample length {t} must be >= window + 2 = {}",
+            window + 2
+        )));
+    }
     let dates = rebalance_indices(t, window, step)?;
     let k = dates.len();
     let mut weights: Vec<Vec<f64>> = Vec::with_capacity(k);
@@ -185,22 +239,18 @@ where
         }
         let t_end = if idx + 1 < k { dates[idx + 1] } else { t };
         for row in t_k..t_end {
-            port[row - window] = dot(returns.row(row), &w);
+            let r = returns.row(row);
+            port[row - window] = kahan_sum((0..n).map(|j| r[j] * w[j]));
         }
         weights.push(w);
     }
     let turnovers: Vec<f64> = (1..k)
-        .map(|i| {
-            let diffs: Vec<f64> = (0..n)
-                .map(|j| (weights[i][j] - weights[i - 1][j]).abs())
-                .collect();
-            np_sum(&diffs)
-        })
+        .map(|i| kahan_sum((0..n).map(|j| (weights[i][j] - weights[i - 1][j]).abs())))
         .collect();
     let avg_turnover = if turnovers.is_empty() {
         0.0
     } else {
-        np_sum(&turnovers) / turnovers.len() as f64
+        kahan_sum(turnovers.iter().copied()) / turnovers.len() as f64
     };
     Ok(BacktestResult {
         ann_return: annualized_return(&port, ANNUALIZATION)?,
@@ -263,5 +313,14 @@ mod tests {
         assert!(annualized_return(&[], 252.0).is_err());
         assert!(annualized_vol(&[0.01], 252.0).is_err());
         assert!(max_drawdown(&[f64::NAN]).is_err());
+        assert!(max_drawdown(&[-1.5]).is_err());
+        assert!(annualized_vol(&[0.01, 0.02], -252.0).is_err());
+        assert!(sharpe_ratio(&[0.01, 0.02], f64::NAN, 252.0).is_err());
+    }
+
+    #[test]
+    fn rebalance_indices_huge_step_terminates() {
+        assert_eq!(rebalance_indices(1250, 500, usize::MAX).unwrap(), vec![500]);
+        assert_eq!(rebalance_indices(1251, 500, 750).unwrap(), vec![500, 1250]);
     }
 }
