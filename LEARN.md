@@ -247,33 +247,43 @@ Cholesky gate whenever `delta > 0` and `F` is PD.
 
 ### 3.2 The pinned estimator, and a worked number
 
-`portopt` implements the constant-correlation estimator of Ledoit-Wolf
-(2004) with one pinned simplification, stated in API_SPEC section 2.2:
-`S` uses divisor `T-1` (consistent with `sample_cov`) while the
-dispersion sums `pi/theta/gamma` use divisor `T`. The off-diagonal
-`rho_hat` terms use only `theta_ii,ij = (1/T) sum_t (x_ti^2 - S_ii)
-(x_ti x_tj - S_ij)`, summed over ordered pairs `i != j` with weight
-`(rbar/2) sqrt(S_jj/S_ii)` — the ordered double sum supplies both
-symmetric halves of the classic formula exactly once each. Ports must
-copy this exactly; "roughly Ledoit-Wolf" will fail the 1e-10 golden
-tolerance.
+`portopt` implements the constant-correlation estimator exactly as in
+Ledoit-Wolf (2004), Appendix B — the formula the authors ship as
+`covCor.m`. Two details matter and are stated in API_SPEC section 2.2:
+
+* the dispersion sums `pi_hat`, `rho_hat`, `gamma_hat` are computed with
+  the paper's divisor-T sample covariance (the shrunk matrix is then
+  returned in the project's ddof=1 convention, which is a pure `T/(T-1)`
+  rescaling — `rbar` and `delta` are scale-free);
+* the off-diagonal part of `rho_hat` is the paper's
+  `sum_{i≠j} (rbar/2) [sqrt(s_jj/s_ii) theta_ii,ij + sqrt(s_ii/s_jj) theta_jj,ij]`,
+  i.e. **both** theta terms for every unordered pair. Summed over ordered
+  pairs that is a weight of `rbar` (not `rbar/2`) on `theta_ii,ij`; an
+  implementation that keeps `rbar/2` per ordered pair halves the
+  correction and over-shrinks (on this data by 31%: 0.00943 instead of
+  0.00721). The test suites check the intensity against a direct
+  transcription of `covCor.m` on hand panels and on the bundled data.
 
 On the bundled data (golden `shrinkage_const_corr_daily`):
 
 ```
 rbar  = 0.4171937171   (average pairwise correlation)
-delta = 0.0094304924   (intensity)
+delta = 0.0072117652   (intensity)
 ```
 
 Diagonals are untouched by construction (`F_ii = S_ii`, so
 `shrunk_0_0 = cov_0_0 = 9.354067081e-05`), and off-diagonals move
 slightly toward the constant-correlation value: `S_01 = 7.746918e-05`
-shrinks to `7.711134e-05`. The intensity is small — under 1% — because
+shrinks to `7.719553e-05`. The intensity is small — under 1% — because
 T = 1250 is large relative to N = 8, so `S` is already well estimated.
 Shrinkage matters most when `N/T` is not small (think 500 stocks on 2
-years of daily data), where optimal intensities of 0.5+ are routine.
-The honest summary: shrinkage reliably improves out-of-sample
-minimum-variance portfolios; it cannot fix expected returns.
+years of daily data), where optimal intensities of 0.5+ are routine; on
+the first five rows of the bundled panel (T = 5 < N = 8) the sample
+covariance is singular, `delta = 0.35`, and the shrunk matrix passes the
+Cholesky gate. The honest summary: shrinkage reliably improves
+out-of-sample minimum-variance portfolios; it cannot fix expected
+returns. For N = 2 the constant-correlation target coincides with the
+sample covariance and `delta = 0` by definition.
 
 ---
 
@@ -283,17 +293,25 @@ minimum-variance portfolios; it cannot fix expected returns.
 
 Add `w >= 0` (no shorting) and the Lagrangian solution dies: which
 constraints bind is unknown in advance, and with box bounds the active
-set can be any of `3^n` sign patterns. The problem is still a convex QP
-with a unique minimizer (for PD `Sigma`), but it must be solved
-iteratively. `portopt` uses **projected gradient descent** (PGD):
-gradient step on the objective, then exact Euclidean projection back
-onto the feasible set
+set can be any of `3^n` sign patterns. The problem is still a strictly
+convex QP with a unique minimizer (for PD `Sigma`), so it must be solved
+by an algorithm that *finds the active set*. `portopt` uses the **dual
+active-set method of Goldfarb and Idnani (1983)** — the algorithm behind
+R's `quadprog` — which starts from the unconstrained minimizer, adds the
+most violated constraint one at a time, and takes the largest step that
+keeps every inequality multiplier non-negative (dropping a constraint when
+its multiplier would turn negative). It is finite: every step strictly
+increases the dual objective, so no active set repeats. Every linear
+solve is the pinned Cholesky of `Sigma` (factored once) or of the small
+Gram matrix of the active normals, and the final point is *polished*: the
+equality-constrained problem on the final active set is re-solved in
+closed form, so the answer is an exact function of the active set rather
+than the tail of an iteration. That is what lets four languages agree to
+1e-13 and lets the solver return an honest **KKT certificate**
+(`converged`, `kkt_residual`) instead of a step-size heuristic.
 
-```
-{ w : sum(w) = 1, lb <= w <= ub }.
-```
-
-The projection has a beautiful structure: the KKT conditions say the
+The box-simplex *projection* (used to validate bounds and exposed as a
+utility) has a beautiful structure of its own: the KKT conditions say the
 projection of `v` is `w_i = clip(v_i - t, lb_i, ub_i)` for a single
 scalar shift `t` chosen so the weights sum to 1. `g(t) = sum_i clip(v_i
 - t, ...)` is piecewise linear and non-increasing, with kinks only at
@@ -302,15 +320,24 @@ breakpoints and interpolating on the bracketing segment solves the
 projection **exactly in finite time** (no tolerance, no iteration).
 Golden hand case: project `[0.9, 0.5, -0.2]` onto the simplex — the
 third coordinate clips to 0, so solve `(0.9-t) + (0.5-t) = 1`, giving
-`t = 0.2` and `w = [0.7, 0.3, 0.0]` (`simplex_projection_hand`). PGD itself is pinned to a deterministic
-doubling/halving backtracking line search (API_SPEC 3.6); with a convex
-objective it converges without any randomness, so ports agree to well
-below 1e-8.
+`t = 0.2` and `w = [0.7, 0.3, 0.0]` (`simplex_projection_hand`).
 
-Constrained frontier points use a pinned quadratic penalty
-`(penalty/2)(mu'w - m)^2` with `penalty = 1e4` rather than an equality
-constraint — simpler to project, and the O(1/penalty) target miss is
-part of the contract.
+Constrained frontier points impose the target return as a genuine
+equality `mu'w = m` (met to rounding — there is no penalty term and no
+target miss). The constrained sweep therefore runs from the constrained
+minimum-variance return (3.04% long-only, versus 3.22% unconstrained on
+the bundled data) to the maximum attainable return under the bounds
+(9.40%, the best single asset when long-only), and a target outside that
+range is rejected with the attainable range in the message.
+
+A first-order alternative — projected gradient descent on a quadratic
+penalty `(rho/2)(mu'w - m)^2` — was the original design and is worth
+remembering as a cautionary tale: the penalty makes the Hessian
+condition number `rho * |mu|^2 / lambda_min(Sigma)` ≈ 7e5, so PGD needs
+tens of millions of iterations, a 10,000-iteration cap silently returned
+a point 1.7e-3 away from the minimizer, and a "max step < 1e-12"
+stopping rule certified nothing. Active-set methods have no such
+parameter.
 
 ### 4.2 Why practitioners *want* the constraint
 
@@ -330,7 +357,7 @@ Compare the golden weights on identical inputs:
 ```
                       US_EQ   EU_EQ   JP_EQ   UK_EQ   EM_EQ  US_BOND IG_CORP FX_CARRY
 minvar_unconstrained  0.055   0.009   0.022   0.032  -0.046   0.701   0.039   0.187
-minvar_longonly_pgd   0.037   0.000   0.016   0.021   0.000   0.732   0.015   0.179
+minvar_longonly_qp    0.037   0.000   0.016   0.021   0.000   0.732   0.015   0.179
 ```
 
 The constrained solution zeroes the short (EM_EQ) and the
@@ -402,12 +429,16 @@ The two scaling knobs confuse everyone, so pin the semantics:
   volatility. Convention: small (0.01–0.1; here 0.05), on the logic that
   the mean is estimated from T observations, `tau ≈ 1/T`. The code
   enforces `0 < tau <= 1`.
-* **Omega** is the view-noise covariance. `portopt` uses the
-  Idzorek-style default `Omega = diag(P (tau Sigma) P')`, each entry
+* **Omega** is the view-noise covariance. `portopt` uses the He and
+  Litterman (1999) default `Omega = diag(P (tau Sigma) P')`, each entry
   divided by a per-view confidence `c_k`: `c → ∞` makes the view
   dogmatic, `c → 0` makes it ignored. Golden `bl_omega_default`: with
   tau = 0.05 and confidences (1.0, 0.5), `Omega_00 = 2.0637e-3`,
-  `Omega_11 = 8.7083e-4`.
+  `Omega_11 = 8.7083e-4`. This divisor is an ad-hoc scaling, **not**
+  Idzorek's (2005) calibration — Idzorek defines confidence as the
+  fraction of the full-confidence tilt the view should produce and solves
+  a 1-D problem per view for the Omega that delivers it; that calibration
+  is not implemented here.
 
 A subtlety worth knowing for interviews: with the default Omega, both
 sides of the update scale with tau, so **the posterior mean is
@@ -471,8 +502,9 @@ diversifies like 1/n but in risk space rather than capital space.
 ### 6.2 The CCD algorithm (pinned)
 
 ERC weights have no closed form for general Sigma. The pinned solver
-(Griveau-Billion/Richard/Roncalli style) minimizes the log-barrier
-objective over `y > 0`:
+(Spinu's 2013 log-barrier formulation, solved by cyclical coordinate
+descent as in Griveau-Billion, Richard and Roncalli 2013) minimizes over
+`y > 0`:
 
 ```
 F(y) = (1/2) y' Sigma y - sum_i b_i * ln(y_i)
@@ -531,18 +563,66 @@ on the compounded wealth path, and L1 turnover
 
 Reading the comparison table (README) as a practitioner would:
 
-* **Turnover is a cost you pay with certainty; alpha is a hope.** At 10
-  bps one-way costs, tangency's 18.2 turnover burns ~36 bps per quarter;
-  ERC's 0.005 burns nothing. Net of costs the ranking tightens further
-  against estimation-hungry methods.
+* **Turnover is a cost you pay with certainty; alpha is a hope.** L1
+  turnover is the notional traded as a fraction of NAV, so at 10 bp
+  one-way costs tangency's 18.2 turnover burns `18.2 × 10 bp = 182 bp`
+  per quarter — about 7.3% a year, more than its entire equity risk
+  premium — while ERC's 0.005 burns half a basis point. Net of costs the
+  ranking tightens further against estimation-hungry methods. (The
+  backtest reports turnover but does not charge it.)
 * **Sharpe differences of 0.1–0.2 on a 750-day holdout are noise.** The
   standard error of a Sharpe estimate over 3 years is roughly 0.6. What
   is significant is the vol and drawdown ordering, which follows
   directly from construction.
 * **Failure handling is part of the method.** Tangency was undefined at
   8 of 12 rebalances (estimated GMV return below rf); the pinned policy
-  falls back to unconstrained min-variance and reports it. Production
+  falls back to unconstrained min-variance **on that error type only**
+  and reports it — a singular covariance still stops the run. Tangency is
+  also rejected when rf sits within one part per million of the GMV
+  return: there `A - rf C` cancels catastrophically and the weights carry
+  gross leverage of 1e6+ (at t = 1004 in this backtest rf came within
+  7e-4 of `A/C`, which is why the demo turnover is 18). Production
   systems need such policies for every error path in API_SPEC section 7.
+
+### 7.1 How a desk would use this
+
+A realistic weekly or quarterly run with this library looks like:
+
+1. **Assemble the panel.** A complete `T × N` matrix of daily simple
+   returns (no gaps — the library rejects NaN; fill or drop upstream), a
+   cap-weight vector for the reverse-optimization prior, and a view list
+   from the PMs. Validate `T ≥ N + 1` unless you intend to rely on
+   shrinkage to repair a singular sample covariance.
+2. **Estimate.** `sample_mean`, `shrink_covariance` on daily returns,
+   `annualize_*` with the desk's convention (252 equity, 260/365 for FX
+   and rates carry — pass `periods` explicitly). Inspect `intensity`: a
+   value near 1 says the sample covariance is nearly uninformative at
+   your `N/T`.
+3. **Build candidates.** The constrained QP (`min_variance_longonly_solve`
+   with the mandate's box bounds; `constrained_frontier_solve` at the
+   target return) is the workhorse — it meets the target exactly, respects
+   the bounds exactly, and returns a KKT certificate. Use
+   `attainable_return_range` to check that the target is feasible under
+   the bounds before asking. Unconstrained tangency and Black-Litterman
+   weights are diagnostics unless you cap `gross_leverage`.
+4. **Sanity-check before it reaches an OMS.** `converged` true and
+   `kkt_residual` tiny; `risk_contributions` for concentration; turnover
+   against the previous target vector (the backtest's L1 turnover is
+   exactly this) multiplied by the desk's cost per unit notional; and the
+   error paths of API_SPEC section 7 mapped to explicit policies (the demo
+   shows one: tangency undefined → fall back to GMV, anything else →
+   stop).
+5. **Backtest honestly.** `run_backtest` with an expanding window and the
+   same weight function reports Sharpe, drawdown and turnover; it charges
+   no costs and knows no calendar, so subtract costs yourself and
+   remember that a 750-day holdout Sharpe has a standard error of roughly
+   0.6 (Lo 2002).
+
+What the library deliberately does not do — calendars and day counts,
+missing data, transaction-cost optimization, leverage constraints beyond
+the box, Idzorek confidence calibration, multi-period objectives — is
+listed in the README's real-world usage notes; those are the pieces a
+desk wraps around it.
 
 Market-convention notes (equity vs FX), since the universe mixes both:
 
@@ -583,9 +663,18 @@ explicit behavior:
 5. **Annualize-then-optimize vs optimize-then-annualize**: closed-form
    weights are scale-invariant in Sigma but *not* jointly in (mu, Sigma)
    with a nonzero rf; the golden cases pin annualized inputs.
-6. **Comparing iterative results across languages**: only pinned
-   algorithms (fixed sweep order, fixed backtracking) make 1e-8
-   agreement possible; "any convex solver" would not.
+6. **Comparing iterative results across languages**: a truncated
+   iteration (PGD stopped by a step-size rule) is a function of the whole
+   floating-point path and can differ across BLAS builds by more than a
+   golden tolerance — this project learned that the hard way. A finite
+   active-set method with a closed-form polish, or a contractive CCD
+   with a tight tolerance, is a function of the *answer*, and agreement
+   becomes a rounding question (1e-13).
+7. **Silent convergence flags**: never accept a solver result whose
+   convergence flag is discarded on the way out. Here the weights-only
+   wrappers raise when the KKT certificate fails, and CCD returns its
+   flag; the demo's tangency fallback matches one exception type, not
+   "any error".
 
 ---
 
@@ -595,7 +684,7 @@ explicit behavior:
 |---|---|---|
 | Unconstrained Markowitz | mu, Sigma known; quadratic utility | Error maximization (sec. 2); extreme, unstable, costly weights; useless mu estimates at feasible T |
 | GMV | Sigma known | Robust to mu by construction, but concentrates in low-vol assets and still inherits Sigma noise |
-| Long-only PGD | Convexity; bounds are meaningful | Corner solutions (zeros) look arbitrary; implicit covariance shrinkage may over-shrink true hedges |
+| Long-only QP | Convexity; bounds are meaningful | Corner solutions (zeros) look arbitrary; implicit covariance shrinkage may over-shrink true hedges |
 | LW shrinkage | Constant-correlation target is a sane prior | Wrong target biases pairs with genuinely unusual correlation; does nothing for mu; assumes iid returns (real returns have volatility clustering) |
 | Black-Litterman | Market is near equilibrium; views are honest, calibrated | delta, tau, Omega are judgment; cap-weight prior is ill-defined for bonds/FX; garbage views in, coherent garbage out |
 | ERC / risk budgeting | Risk = covariance; budgets are meaningful | Ignores expected returns entirely; unlevered version is bond-heavy; levered version bets on stable stock-bond correlation and cheap financing (2022) |
@@ -622,9 +711,10 @@ to the noisiest input.
 **Q2. What is the two-fund theorem and why does it matter
 computationally?**
 Every frontier portfolio is `w(m) = g + h*m` — an affine family spanned
-by two fixed portfolios. Computationally, one pair of Cholesky solves
-(`Sigma^{-1}mu`, `Sigma^{-1}1`) prices the entire frontier; the 25-point
-sweep in `efficient_frontier` costs no extra factorizations.
+by two fixed portfolios. Computationally, one Cholesky factorization and
+one pair of solves (`Sigma^{-1}mu`, `Sigma^{-1}1`) price the entire
+frontier; `efficient_frontier` computes `g` and `h` once and the 25-point
+sweep is 25 axpy operations.
 
 **Q3. Your optimizer says short EU_EQ 58% and lever US_EQ 136%. What do
 you tell your PM?**
@@ -650,7 +740,7 @@ happens in the limits?**
 (small, ~1/T); `Omega` is the noise covariance of the views. Fixed
 Omega, `tau → 0`: prior becomes dogmatic, posterior → pi. `Omega → ∞`
 (confidence → 0): views ignored, posterior mean → pi, while the
-posterior mean-uncertainty M → tau*Sigma. With the Idzorek default
+posterior mean-uncertainty M → tau*Sigma. With the He-Litterman default
 `Omega = diag(P tau Sigma P')/c`, tau cancels and only the confidences
 c matter.
 
@@ -687,19 +777,24 @@ happened and what do you do?**
 no line through (0, rf) is tangent to the upper frontier — the
 "tangency" would be on the inefficient lower branch. It happens
 routinely with estimated means (8 of 12 rebalances in the bundled
-backtest). Policy options: fall back to GMV (the pinned choice), use
-excess-return BL inputs, or treat it as a signal that the estimated
-frontier is too flat to bet on.
+backtest). The same error fires when rf is merely *close* to the GMV
+return (within 1e-6 relative): `A - rf C` then cancels catastrophically
+and the "portfolio" has gross leverage of millions. Policy options: fall
+back to GMV (the pinned choice), use excess-return BL inputs, or treat it
+as a signal that the estimated frontier is too flat to bet on — and
+always look at `gross_leverage` before trusting unconstrained weights.
 
 **Q10. Why does this project pin algorithms (Cholesky variant, sweep
-order, backtracking rule) instead of just pinning tolerances?**
+order, active-set rules) instead of just pinning tolerances?**
 Because different correct algorithms produce different last-bit
-rounding, and iterative methods amplify path differences: "any QP
-solver" could put a different vertex of the same near-degenerate face
-within 1e-4, not 1e-8. Pinning the operation sequence makes
-cross-language agreement a rounding question (1e-10..1e-12 for closed
-forms) instead of an algorithm question — that is what makes
-`golden.json` enforceable in four languages.
+rounding, and truncated iterations amplify path differences: "any QP
+solver" stopped by a step-size rule could sit anywhere within 1e-4 of the
+minimizer. Pinning the operation sequence — and, for the QP, finishing
+with a closed-form polish on the identified active set — makes
+cross-language agreement a rounding question (1e-10..1e-13) instead of
+an algorithm question; that is what makes `golden.json` enforceable in
+four languages, and it is also why the suites check that scaling the
+input by one ulp moves the QP goldens by less than 1e-13.
 
 ---
 
@@ -719,12 +814,24 @@ forms) instead of an algorithm question — that is what makes
 * R. Jagannathan, T. Ma (2003), *Risk Reduction in Large Portfolios: Why
   Imposing the Wrong Constraints Helps*.
 * F. Black, R. Litterman (1992), *Global Portfolio Optimization*;
+  G. He, R. Litterman (1999), *The Intuition Behind Black-Litterman Model
+  Portfolios* — the default `Omega = diag(P tau Sigma P')` used here;
   T. Idzorek (2005), *A Step-by-Step Guide to the Black-Litterman
-  Model* — the confidence-based Omega.
+  Model* — the confidence calibration this project does *not* implement.
 * S. Maillard, T. Roncalli, J. Teiletche (2010), *The Properties of
-  Equally Weighted Risk Contribution Portfolios*; T. Griveau-Billion,
+  Equally Weighted Risk Contribution Portfolios*; F. Spinu (2013), *An
+  Algorithm for Computing Risk Parity Weights* — the log-barrier
+  formulation and coordinate update implemented here; T. Griveau-Billion,
   J.-C. Richard, T. Roncalli (2013), *A Fast Algorithm for Computing
-  High-dimensional Risk Parity Portfolios* — the CCD solver.
+  High-dimensional Risk Parity Portfolios* — cyclical coordinate descent.
+* D. Goldfarb, A. Idnani (1983), *A numerically stable dual method for
+  solving strictly convex quadratic programs* — the constrained QP solver.
+* J. Duchi, S. Shalev-Shwartz, Y. Singer, T. Chandra (2008), *Efficient
+  Projections onto the l1-Ball for Learning in High Dimensions*; K. Kiwiel
+  (2008), *Breakpoint searching algorithms for the continuous quadratic
+  knapsack problem* — the exact box-simplex projection.
+* A. Lo (2002), *The Statistics of Sharpe Ratios* — Sharpe annualization
+  and its standard error.
 * A. Frazzini, L. Pedersen (2014), *Betting Against Beta* — the
   leverage-aversion foundation of the risk-parity trade.
 * V. DeMiguel, L. Garlappi, R. Uppal (2009), *Optimal Versus Naive

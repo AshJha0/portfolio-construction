@@ -19,13 +19,13 @@ flowchart TD
 
     subgraph OPT["portfolio constructors"]
         TF["two_fund_scalars A,B,C,D<br/>min-var / tangency / frontier"]
-        PGD["PGD + exact box-simplex projection<br/>long-only min-var, penalty frontier"]
+        QP["dual active-set QP + KKT certificate<br/>box min-var, exact-target frontier"]
         BL["black_litterman<br/>pi = delta*Sigma*w_mkt -> posterior"]
         RP["risk_parity CCD<br/>y_i quadratic update"]
     end
 
     BT["backtest: t_k = 500 + 63k,<br/>expanding window, L1 turnover"]
-    OUTG["golden.json (21 cases)"]
+    OUTG["golden.json (23 cases)"]
     OUTD["demo report"]
 
     RET --> MU
@@ -34,17 +34,18 @@ flowchart TD
     CFG --> MU
     CFG --> COV
     COV --> TF
-    COV --> PGD
+    COV --> QP
     COV --> BL
     COV --> RP
     MU --> TF
+    MU --> QP
     MU --> BL
     CAPS --> BL
     VIEWS --> BL
     CHOL --> SOLVE
     LA -. "every Sigma^-1 x" .-> OPT
     TF --> BT
-    PGD --> BT
+    QP --> BT
     BL --> BT
     RP --> BT
     RET --> BT

@@ -1,5 +1,4 @@
-//! Property, limit, and edge-case tests from the P10 spec's
-//! "tests must also cover" list, on the bundled 8-asset data.
+//! Property, limit, and edge-case tests on the bundled 8-asset data.
 
 use std::path::{Path, PathBuf};
 
@@ -113,8 +112,47 @@ fn tangency_rf_above_all_returns_rejected() {
     let too_high = c.mu.iter().cloned().fold(f64::NEG_INFINITY, f64::max) + 0.01;
     assert!(matches!(
         po::tangency_weights(&c.mu, &c.sig, too_high),
-        Err(PortOptError::Undefined(_))
+        Err(PortOptError::TangencyUndefined(_))
     ));
+    assert!(matches!(
+        po::tangency_weights(&c.mu, &c.sig, f64::NAN),
+        Err(PortOptError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn tangency_near_gmv_rejected() {
+    // MAJ-1: rf within 1e-6 (relative) of A/C cancels A - rf*C catastrophically.
+    let c = ctx();
+    let sc = po::two_fund_scalars(&c.mu, &c.sig).unwrap();
+    let r_gmv = sc.a / sc.c;
+    for eps in [1e-13, 1e-9] {
+        assert!(matches!(
+            po::tangency_weights(&c.mu, &c.sig, r_gmv - eps),
+            Err(PortOptError::TangencyUndefined(_))
+        ));
+    }
+    let w = po::tangency_weights(&c.mu, &c.sig, r_gmv - 1e-3).unwrap();
+    assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-8);
+    let l1: f64 = w.iter().map(|v| v.abs()).sum();
+    assert!((po::gross_leverage(&w).unwrap() - l1).abs() < 1e-12);
+    assert!((po::gross_leverage(&[0.2, 0.3, 0.5]).unwrap() - 1.0).abs() < 1e-15);
+    assert!((po::gross_leverage(&[1.5, -0.5]).unwrap() - 2.0).abs() < 1e-15);
+    assert!(po::gross_leverage(&[]).is_err());
+    assert!(po::gross_leverage(&[f64::NAN]).is_err());
+}
+
+#[test]
+fn frontier_grid_when_gmv_return_exceeds_max_mu() {
+    // MAJ-3: GMV shorts the low-return asset, A/C = 0.1185 > max(mu) = 0.10.
+    let mu = [0.10, 0.05];
+    let sig = Matrix::from_rows(&[vec![0.01, 0.027], vec![0.027, 0.09]]).unwrap();
+    let sc = po::two_fund_scalars(&mu, &sig).unwrap();
+    assert!(sc.a / sc.c > 0.10);
+    assert!(matches!(po::efficient_frontier(&mu, &sig, 25), Err(PortOptError::Undefined(_))));
+    assert!(matches!(po::constrained_frontier(&mu, &sig, 25, None, None), Err(PortOptError::Undefined(_))));
+    let w = po::frontier_weights(&mu, &sig, 0.13).unwrap();
+    assert!((dot(&mu, &w) - 0.13).abs() < 1e-12);
 }
 
 #[test]
@@ -138,28 +176,42 @@ fn singular_covariance_from_duplicated_asset_rejected() {
     ));
 }
 
-// ----------------------------------------------------------------------- PGD
+// ------------------------------------------------------------------------ QP
 
 #[test]
-fn pgd_matches_closed_form_when_constraints_inactive() {
+fn qp_matches_closed_form_when_constraints_inactive() {
     let c = ctx();
     let w_cf = po::min_variance_weights(&c.sig).unwrap();
     let lb = vec![-10.0; 8];
     let ub = vec![10.0; 8];
-    let w_pgd = po::min_variance_longonly(&c.sig, Some(&lb), Some(&ub)).unwrap();
+    let res = po::min_variance_longonly_solve(&c.sig, Some(&lb), Some(&ub), po::QP_MAX_ITER).unwrap();
+    assert!(res.converged && res.iterations <= 2);
     for i in 0..8 {
-        assert!((w_pgd[i] - w_cf[i]).abs() < 1e-6);
+        assert!((res.weights[i] - w_cf[i]).abs() < 1e-14);
     }
 }
 
 #[test]
-fn pgd_longonly_feasible_and_deterministic() {
+fn qp_longonly_certified_kkt_and_deterministic() {
     let c = ctx();
-    let w1 = po::min_variance_longonly(&c.sig, None, None).unwrap();
+    let res = po::min_variance_longonly_solve(&c.sig, None, None, po::QP_MAX_ITER).unwrap();
+    assert!(res.converged);
+    assert!(res.kkt_residual < 1e-12);
+    let w1 = res.weights.clone();
     let w2 = po::min_variance_longonly(&c.sig, None, None).unwrap();
-    assert_eq!(w1, w2, "PGD must be bit-deterministic");
-    assert!(w1.iter().all(|&v| v >= -1e-14));
+    assert_eq!(w1, w2, "QP must be bit-deterministic");
+    assert!(w1.iter().all(|&v| v >= 0.0));
     assert!((w1.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+    // KKT for {sum w = 1, w >= 0}: constant gradient on the support, >= off it.
+    let g = c.sig.matvec(&w1);
+    let lam = (0..8).filter(|&i| w1[i] > 1e-14).map(|i| g[i]).fold(f64::INFINITY, f64::min);
+    for i in 0..8 {
+        if w1[i] > 1e-14 {
+            assert!((g[i] - lam).abs() < 1e-13);
+        } else {
+            assert!(g[i] >= lam - 1e-13);
+        }
+    }
     // Long-only optimum cannot beat the unconstrained optimum.
     let w_cf = po::min_variance_weights(&c.sig).unwrap();
     let v_lo = dot(&w1, &c.sig.matvec(&w1));
@@ -168,43 +220,111 @@ fn pgd_longonly_feasible_and_deterministic() {
 }
 
 #[test]
-fn constrained_frontier_penalty_return_near_target() {
+fn qp_box_bounds_respected_and_optimal() {
+    // PT-14: lb = 0.02, ub = 0.40 hold exactly; beats projected random points.
     let c = ctx();
-    let w = po::constrained_frontier_weights(&c.mu, &c.sig, 0.08, 1e4, None, None).unwrap();
-    assert!(w.iter().all(|&v| v >= -1e-14));
-    assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-12);
-    // Penalty formulation: achieved return within O(1/penalty) of target.
-    assert!((dot(&c.mu, &w) - 0.08).abs() < 1e-3);
-}
-
-#[test]
-fn simplex_projection_euclidean_optimality_grid() {
-    // Deterministic pseudo-random inputs (LCG), checked against a grid of
-    // feasible competitors: the projection must be the closest point.
-    let mut state = 123456789u64;
+    let lb = vec![0.02; 8];
+    let ub = vec![0.40; 8];
+    let res = po::min_variance_longonly_solve(&c.sig, Some(&lb), Some(&ub), po::QP_MAX_ITER).unwrap();
+    assert!(res.converged && res.kkt_residual < 1e-12);
+    assert!(res.weights.iter().all(|&v| (0.02..=0.40).contains(&v)));
+    assert!((res.weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+    let var = dot(&res.weights, &c.sig.matvec(&res.weights));
+    let mut state = 987654321u64;
     let mut next = move || {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
     };
     for _ in 0..20 {
-        let v: Vec<f64> = (0..6).map(|_| next() * 2.0).collect();
-        let ub = vec![0.6; 6];
-        let w = po::project_simplex_box(&v, 1.0, None, Some(&ub)).unwrap();
-        assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-12);
-        assert!(w.iter().all(|&x| (-1e-14..=0.6 + 1e-14).contains(&x)));
-        let d_w: f64 = (0..6).map(|i| (w[i] - v[i]) * (w[i] - v[i])).sum();
-        for _ in 0..10 {
-            // Feasible competitor: normalized clipped positive vector.
-            let mut z: Vec<f64> = (0..6).map(|_| next().abs() + 0.05).collect();
-            let zs: f64 = z.iter().sum();
-            z.iter_mut().for_each(|x| *x /= zs);
-            if z.iter().any(|&x| x > 0.6) {
-                continue;
-            }
-            let d_z: f64 = (0..6).map(|i| (z[i] - v[i]) * (z[i] - v[i])).sum();
-            assert!(d_w <= d_z + 1e-10);
+        let v: Vec<f64> = (0..8).map(|_| next()).collect();
+        let z = po::project_simplex_box(&v, 1.0, Some(&lb), Some(&ub)).unwrap();
+        assert!(var <= dot(&z, &c.sig.matvec(&z)) + 1e-15);
+    }
+}
+
+#[test]
+fn constrained_frontier_reports_convergence_and_hits_target() {
+    // PT-3: every point certified, target met exactly, variance monotone.
+    let c = ctx();
+    let res = po::constrained_frontier_solve(&c.mu, &c.sig, 0.08, None, None, po::QP_MAX_ITER).unwrap();
+    assert!(res.converged && res.kkt_residual < 1e-9);
+    assert!(res.weights.iter().all(|&v| v >= 0.0));
+    assert!((res.weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+    assert!((dot(&c.mu, &res.weights) - 0.08).abs() < 1e-12);
+    let sweep = po::constrained_frontier(&c.mu, &c.sig, 25, None, None).unwrap();
+    let w_lo = po::min_variance_longonly(&c.sig, None, None).unwrap();
+    let mu_max = c.mu.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    assert!((sweep.targets[0] - dot(&c.mu, &w_lo)).abs() < 1e-15);
+    assert_eq!(sweep.targets[24], mu_max);
+    for k in 0..25 {
+        let w = &sweep.weights[k];
+        assert!((dot(&c.mu, w) - sweep.targets[k]).abs() < 1e-12);
+        assert!(w.iter().all(|&v| v >= 0.0));
+        assert!((sweep.variances[k] - dot(w, &c.sig.matvec(w))).abs() < 1e-15);
+        if k > 0 {
+            assert!(sweep.variances[k] >= sweep.variances[k - 1] - 1e-14);
         }
     }
+    for i in 0..8 {
+        assert!((sweep.weights[24][i] - if c.mu[i] == mu_max { 1.0 } else { 0.0 }).abs() < 1e-15);
+        assert!((sweep.weights[0][i] - w_lo[i]).abs() < 1e-15);
+    }
+    let a = po::constrained_frontier(&c.mu, &c.sig, 7, None, None).unwrap();
+    let b = po::constrained_frontier(&c.mu, &c.sig, 7, None, None).unwrap();
+    assert_eq!(a.weights, b.weights, "sweep must be bit-deterministic");
+}
+
+#[test]
+fn constrained_frontier_rejects_unattainable_targets() {
+    let c = ctx();
+    let w_lo = po::min_variance_longonly(&c.sig, None, None).unwrap();
+    let mu_max = c.mu.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    assert!(matches!(
+        po::constrained_frontier_weights(&c.mu, &c.sig, dot(&c.mu, &w_lo) - 1e-3, None, None),
+        Err(PortOptError::Undefined(_))
+    ));
+    assert!(matches!(
+        po::constrained_frontier_weights(&c.mu, &c.sig, mu_max + 1e-3, None, None),
+        Err(PortOptError::Undefined(_))
+    ));
+    let ub = vec![0.4; 8];
+    assert!(po::constrained_frontier_weights(&c.mu, &c.sig, 0.09, None, Some(&ub)).is_err());
+    assert!(po::constrained_frontier_weights(&c.mu, &c.sig, f64::INFINITY, None, None).is_err());
+    assert!(po::constrained_frontier_solve(&c.mu, &c.sig, 0.06, None, None, 0).is_err());
+    assert!(po::constrained_frontier(&c.mu, &c.sig, 1, None, None).is_err());
+}
+
+#[test]
+fn attainable_return_range_and_degenerate_inputs() {
+    let c = ctx();
+    let (r_min, r_max) = po::attainable_return_range(&c.mu, None, None).unwrap();
+    let mut sorted = c.mu.clone();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    assert_eq!(r_max, sorted[0]);
+    assert_eq!(r_min, sorted[7]);
+    let lb = vec![0.0; 8];
+    let ub = vec![0.4; 8];
+    let (rc_min, rc_max) = po::attainable_return_range(&c.mu, Some(&lb), Some(&ub)).unwrap();
+    assert!((rc_max - (0.4 * sorted[0] + 0.4 * sorted[1] + 0.2 * sorted[2])).abs() < 1e-15);
+    assert!((rc_min - (0.4 * sorted[7] + 0.4 * sorted[6] + 0.2 * sorted[5])).abs() < 1e-15);
+    assert!(po::attainable_return_range(&c.mu, Some(&[0.2; 8]), None).is_err());
+    // Fixed asset (lb == ub), tied top returns with caps, all-equal returns.
+    let mut lb2 = vec![0.0; 8];
+    let mut ub2 = vec![f64::INFINITY; 8];
+    lb2[5] = 0.30;
+    ub2[5] = 0.30;
+    let fixed = po::min_variance_longonly_solve(&c.sig, Some(&lb2), Some(&ub2), po::QP_MAX_ITER).unwrap();
+    assert!(fixed.converged && fixed.weights[5] == 0.30);
+    let mut mu2 = c.mu.clone();
+    mu2[1] = mu2[0];
+    let mu2_max = mu2.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let cap = vec![0.7; 8];
+    let tie = po::constrained_frontier_solve(&mu2, &c.sig, mu2_max, Some(&lb), Some(&cap), po::QP_MAX_ITER).unwrap();
+    assert!(tie.converged && tie.kkt_residual < 1e-12);
+    assert!((tie.weights[0] + tie.weights[1] - 1.0).abs() < 1e-12);
+    let flat = po::constrained_frontier_solve(&[0.05; 8], &c.sig, 0.05, None, None, po::QP_MAX_ITER).unwrap();
+    assert!(flat.converged);
+    assert_eq!(flat.weights, po::min_variance_longonly(&c.sig, None, None).unwrap());
 }
 
 // ------------------------------------------------------------------ shrinkage
@@ -237,7 +357,141 @@ fn shrinkage_intensity_in_unit_interval_and_psd() {
     }
 }
 
+/// Direct transcription of Ledoit & Wolf's covCor.m (JPM 2004, App. B):
+/// divisor T throughout, both theta terms per ordered pair. Returns (delta, rbar).
+fn covcor(x: &Matrix) -> (f64, f64) {
+    let (t, n) = (x.nrows(), x.ncols());
+    let tf = t as f64;
+    let xc: Vec<Vec<f64>> = (0..n)
+        .map(|j| {
+            let m = (0..t).map(|r| x.get(r, j)).sum::<f64>() / tf;
+            (0..t).map(|r| x.get(r, j) - m).collect()
+        })
+        .collect();
+    let sample = |i: usize, j: usize| (0..t).map(|r| xc[i][r] * xc[j][r]).sum::<f64>() / tf;
+    let sqrtvar: Vec<f64> = (0..n).map(|i| sample(i, i).sqrt()).collect();
+    let mut corr = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            corr += sample(i, j) / (sqrtvar[i] * sqrtvar[j]);
+        }
+    }
+    let rbar = (corr - n as f64) / (n as f64 * (n - 1) as f64);
+    let (mut phi, mut rho, mut gamma) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        for j in 0..n {
+            let sij = sample(i, j);
+            let (mut phi_ij, mut theta_ij) = (0.0, 0.0);
+            for r in 0..t {
+                let d = xc[i][r] * xc[j][r] - sij;
+                phi_ij += d * d;
+                theta_ij += (xc[i][r] * xc[i][r] - sample(i, i)) * d;
+            }
+            phi += phi_ij / tf;
+            let prior = if i == j { sample(i, i) } else { rbar * sqrtvar[i] * sqrtvar[j] };
+            gamma += (sij - prior) * (sij - prior);
+            if i == j {
+                rho += phi_ij / tf;
+            } else {
+                rho += rbar * (sqrtvar[j] / sqrtvar[i]) * theta_ij / tf;
+            }
+        }
+    }
+    (((phi - rho) / gamma / tf).clamp(0.0, 1.0), rbar)
+}
+
+#[test]
+fn lw_rho_matches_paper_formula() {
+    // PT-1 (CRIT-1): 12x3 hand panel with unequal vols.
+    let rows = [
+        [0.010, 0.020, -0.010], [-0.020, 0.000, 0.010], [0.030, -0.010, 0.020],
+        [0.005, 0.040, -0.030], [-0.015, -0.030, 0.000], [0.025, 0.010, 0.015],
+        [-0.010, 0.050, -0.020], [0.000, -0.020, 0.025], [0.020, 0.030, 0.005],
+        [-0.030, -0.040, -0.010], [0.015, 0.000, 0.030], [0.010, 0.060, -0.005],
+    ];
+    let scale = [1.0, 3.0, 0.5];
+    let x = Matrix::from_rows(
+        &rows.iter().map(|r| (0..3).map(|c| r[c] * scale[c]).collect()).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let (delta, rbar) = covcor(&x);
+    let res = po::shrink_covariance(&x).unwrap();
+    assert!((res.intensity - delta).abs() < 1e-12);
+    assert!((res.rbar - rbar).abs() < 1e-12);
+    // n = 2: target == sample (gamma_hat = 0) -> delta = 0, sigma == sample.
+    let x2 = Matrix::from_rows(&rows.iter().map(|r| vec![r[0], r[1]]).collect::<Vec<_>>()).unwrap();
+    let res2 = po::shrink_covariance(&x2).unwrap();
+    assert_eq!(res2.intensity, 0.0);
+    assert_eq!(res2.sigma, res2.sample);
+}
+
+#[test]
+fn lw_bundled_data_matches_paper_and_small_t_repairs_singular_sample() {
+    let c = ctx();
+    let (delta, rbar) = covcor(&c.returns);
+    let sh = po::shrink_covariance(&c.returns).unwrap();
+    assert!((sh.intensity - delta).abs() < 1e-13);
+    assert!((sh.intensity - 0.00721176522548).abs() < 1e-12); // paper value, not 0.009430
+    assert!((sh.rbar - rbar).abs() < 1e-13);
+    // PT-2: T = 5 <= N = 8, sample singular, shrunk SPD.
+    let head = Matrix::from_rows(&(0..5).map(|r| c.returns.row(r).to_vec()).collect::<Vec<_>>()).unwrap();
+    let res = po::shrink_covariance(&head).unwrap();
+    assert!(res.intensity > 0.0 && res.intensity <= 1.0);
+    assert!(matches!(po::cholesky(&res.sample), Err(PortOptError::NotPositiveDefinite(_))));
+    po::cholesky(&res.sigma).expect("shrunk covariance must be SPD");
+    assert!((res.intensity - covcor(&head).0).abs() < 1e-12);
+}
+
+#[test]
+fn shrinkage_zero_variance_rejected() {
+    // PT-9: a constant column has zero sample variance.
+    let rows: Vec<Vec<f64>> = (0..10).map(|r| vec![-0.01 + 0.02 * r as f64 / 9.0, 0.004]).collect();
+    let x = Matrix::from_rows(&rows).unwrap();
+    assert!(matches!(po::shrink_covariance(&x), Err(PortOptError::InvalidInput(_))));
+}
+
 // ------------------------------------------------------------------ risk parity
+
+#[test]
+fn erc_permutation_invariance() {
+    // PT-12: erc(P S P') == P erc(S).
+    let c = ctx();
+    let perm = [5usize, 2, 7, 0, 3, 6, 1, 4];
+    let ps = Matrix::from_rows(
+        &(0..8).map(|i| (0..8).map(|j| c.sig.get(perm[i], perm[j])).collect()).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let w = po::erc_weights(&c.sig).unwrap();
+    let wp = po::erc_weights(&ps).unwrap();
+    for i in 0..8 {
+        assert!((wp[i] - w[perm[i]]).abs() < 1e-10);
+    }
+    let b = [0.20, 0.20, 0.15, 0.15, 0.10, 0.10, 0.05, 0.05];
+    let bp: Vec<f64> = (0..8).map(|i| b[perm[i]]).collect();
+    let wb = po::risk_budget_weights(&c.sig, Some(&b)).unwrap();
+    let wbp = po::risk_budget_weights(&ps, Some(&bp)).unwrap();
+    for i in 0..8 {
+        assert!((wbp[i] - wb[perm[i]]).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn erc_scale_invariance_and_cap_reported() {
+    // PT-13: daily vs annualized covariance give the same ERC weights.
+    let c = ctx();
+    let sig_d = po::sample_cov(&c.returns).unwrap();
+    let d = po::risk_budget_solve(&sig_d, None, po::CCD_TOL, po::CCD_MAX_SWEEPS).unwrap();
+    let a = po::risk_budget_solve(&sig_d.scaled(252.0), None, po::CCD_TOL, po::CCD_MAX_SWEEPS).unwrap();
+    let k = po::risk_budget_solve(&sig_d.scaled(1e-6), None, po::CCD_TOL, po::CCD_MAX_SWEEPS).unwrap();
+    assert!(d.converged && a.converged && k.converged);
+    for i in 0..8 {
+        assert!((d.weights[i] - a.weights[i]).abs() < 1e-10);
+        assert!((d.weights[i] - k.weights[i]).abs() < 1e-10);
+    }
+    let capped = po::risk_budget_solve(&c.sig, None, po::CCD_TOL, 1).unwrap();
+    assert!(!capped.converged && capped.sweeps == 1);
+    assert!((capped.weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+}
 
 #[test]
 fn risk_contribution_identities() {
@@ -337,6 +591,47 @@ fn bl_limits_and_conflicting_views() {
     for k in 0..2 {
         assert!((om2.get(k, k) - 2.0 * om1.get(k, k)).abs() < 1e-15);
     }
+}
+
+#[test]
+fn relative_view_same_legs_and_parse_errors() {
+    // PT-7 (MAJ-2) and PT-11.
+    let c = ctx();
+    let same = vec![po::View::Relative { long: "US_EQ".into(), short: "US_EQ".into(), q: 0.02, confidence: 1.0 }];
+    assert!(matches!(po::views_to_matrices(&same, &c.names), Err(PortOptError::InvalidInput(_))));
+    let unknown = vec![po::View::Absolute { asset: "NOPE".into(), q: 0.1, confidence: 1.0 }];
+    assert!(po::views_to_matrices(&unknown, &c.names).is_err());
+    let nan_q = vec![po::View::Absolute { asset: "US_EQ".into(), q: f64::NAN, confidence: 1.0 }];
+    assert!(po::views_to_matrices(&nan_q, &c.names).is_err());
+    let mut dup = c.names.clone();
+    dup.push("US_EQ".into());
+    let ok = vec![po::View::Absolute { asset: "US_EQ".into(), q: 0.1, confidence: 1.0 }];
+    assert!(po::views_to_matrices(&ok, &dup).is_err());
+    assert!(po::views_to_matrices(&ok, &[]).is_err());
+    let zero_conf = vec![po::View::Absolute { asset: "US_EQ".into(), q: 0.1, confidence: 0.0 }];
+    assert!(po::views_to_matrices(&zero_conf, &c.names).is_err());
+}
+
+#[test]
+fn omega_and_confidences_together_rejected_and_leverage() {
+    // MIN-12: explicit Omega plus confidences would silently ignore the latter.
+    let c = ctx();
+    let pi = po::implied_equilibrium_returns(&c.sig, &c.w_mkt, c.views.delta).unwrap();
+    let (p, q, conf) = po::views_to_matrices(&c.views.views, &c.names).unwrap();
+    let omega = po::default_omega(&c.sig, &p, c.views.tau, Some(&conf)).unwrap();
+    assert!(matches!(
+        po::bl_posterior(&c.sig, &pi, &p, &q, c.views.tau, Some(&omega), Some(&conf)),
+        Err(PortOptError::InvalidInput(_))
+    ));
+    assert!(po::bl_weights(&c.sig, &pi, &p, &q, c.views.tau, 0.0, Some(&omega), Some(&conf)).is_err());
+    assert!(po::bl_weights(&c.sig, &pi, &p, &q, c.views.tau, f64::NAN, None, Some(&conf)).is_err());
+    let a = po::bl_posterior(&c.sig, &pi, &p, &q, c.views.tau, Some(&omega), None).unwrap();
+    let b = po::bl_posterior(&c.sig, &pi, &p, &q, c.views.tau, None, Some(&conf)).unwrap();
+    for i in 0..8 {
+        assert!((a.mu_post[i] - b.mu_post[i]).abs() < 1e-16);
+    }
+    let (w, _) = po::bl_weights(&c.sig, &pi, &p, &q, c.views.tau, 0.0, None, Some(&conf)).unwrap();
+    assert!(po::gross_leverage(&w).unwrap() > 1.0); // posterior shorts EU_EQ
 }
 
 #[test]
@@ -443,6 +738,38 @@ fn backtest_expanding_window_and_validation() {
         63,
     );
     assert!(matches!(failing, Err(PortOptError::Undefined(_))));
+}
+
+#[test]
+fn metrics_reject_bad_rf_periods_and_total_loss() {
+    // PT-15 / MIN-13 / MAJ-5.
+    let r = [0.01, -0.02, 0.015, 0.0, 0.005];
+    assert!(po::sharpe_ratio(&r, f64::NAN, 252.0).is_err());
+    assert!(po::sharpe_ratio(&r, f64::INFINITY, 252.0).is_err());
+    for bad in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+        assert!(po::annualized_vol(&r, bad).is_err());
+        assert!(po::annualized_return(&r, bad).is_err());
+    }
+    assert!(po::max_drawdown(&[-1.5]).is_err());
+    assert!(po::max_drawdown(&[0.1, -1.0, 0.2]).is_err());
+    assert!(po::annualized_return(&[0.1, -1.2], 252.0).is_err());
+    assert!((po::max_drawdown(&[-0.999]).unwrap() - 0.999).abs() < 1e-15);
+}
+
+#[test]
+fn backtest_minimal_sample() {
+    // PT-10: T = window + 2 is the smallest valid backtest; T = window + 1 errors.
+    let c = ctx();
+    let take = |t: usize| Matrix::from_rows(&(0..t).map(|r| c.returns.row(r).to_vec()).collect::<Vec<_>>()).unwrap();
+    let eq = |h: &Matrix| Ok(vec![1.0 / h.ncols() as f64; h.ncols()]);
+    let r = po::run_backtest(&take(502), eq, 0.02, 500, 63).unwrap();
+    assert_eq!(r.rebalance_dates, vec![500]);
+    assert_eq!(r.portfolio_returns.len(), 2);
+    assert!(r.turnovers.is_empty() && r.avg_turnover == 0.0);
+    assert!(r.sharpe.is_finite() && r.ann_vol.is_finite());
+    assert_eq!(po::rebalance_indices(501, 500, 63).unwrap(), vec![500]);
+    assert!(matches!(po::run_backtest(&take(501), eq, 0.02, 500, 63), Err(PortOptError::InvalidInput(_))));
+    assert!(po::run_backtest(&take(502), eq, f64::NAN, 500, 63).is_err());
 }
 
 #[test]

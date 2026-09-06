@@ -1,5 +1,6 @@
 /// \file markowitz.hpp
-/// \brief Markowitz mean-variance: closed forms, simplex projection, PGD.
+/// \brief Markowitz mean-variance: closed forms, simplex projection, and
+///        the constrained active-set QP.
 ///
 /// Closed-form results use the classical two-fund theorem. With
 /// x = Sigma^-1 mu and y = Sigma^-1 1 (both computed by Cholesky solves,
@@ -15,24 +16,35 @@
 /// portfolio is y / C (return A/C, variance 1/C) and the tangency
 /// portfolio is Sigma^-1 (mu - rf 1) / (A - rf C).
 ///
-/// Constrained problems (long-only, sum-to-one, optional box bounds) are
-/// solved by projected gradient descent with monotone backtracking and an
-/// exact sort-based projection onto the box-constrained simplex; all
-/// steps are pinned in API_SPEC.md sections 3.3-3.6.
+/// Constrained problems (sum-to-one, optional target return, box bounds)
+/// are strictly convex QPs solved by the finite dual active-set method of
+/// Goldfarb & Idnani (1983) whose every linear solve is the pinned
+/// Cholesky (API_SPEC.md section 3.6). The result is the KKT point of the
+/// QP up to rounding, so all ports agree to ~1e-13 and `converged` is a
+/// statement about the KKT conditions, not about an iterate step size.
 #pragma once
 
-#include <functional>
+#include <utility>
 
 #include "portopt/linalg.hpp"
 
 namespace portopt {
 
-/// Pinned quadratic-penalty coefficient for constrained frontier points.
-constexpr double kFrontierPenalty = 1.0e4;
-/// Pinned PGD convergence tolerance (max|w+ - w| per iteration).
-constexpr double kPgdTol = 1.0e-12;
-/// Pinned PGD iteration cap.
-constexpr int kPgdMaxIter = 10000;
+/// Pinned iteration cap of the dual active-set QP (each iteration adds or
+/// drops one constraint; the method is finite for a strictly convex
+/// objective, so the cap is only hit on numerically inconsistent inputs
+/// and is then reported via `converged = false`).
+constexpr int kQpMaxIter = 1000;
+/// Pinned feasibility tolerance: a bound counts as violated when
+/// n'w - b < -kQpFeasTol * (1 + |b|).
+constexpr double kQpFeasTol = 1.0e-13;
+/// Pinned tolerance below which a rounding-level violation of a constraint
+/// that is linearly dependent on the active set is accepted as satisfied.
+constexpr double kQpDegenerateTol = 1.0e-9;
+/// Pinned KKT certificate tolerance (relative) for `converged`.
+constexpr double kQpConvTol = 1.0e-9;
+/// Pinned relative conditioning threshold for the tangency denominator.
+constexpr double kTangencyCondRtol = 1.0e-6;
 
 /// Two-fund theorem scalars A, B, C, D (see file docstring).
 struct TwoFundScalars {
@@ -52,10 +64,19 @@ TwoFundScalars two_fund_scalars(const Vector& mu, const Matrix& sigma);
 Vector min_variance_weights(const Matrix& sigma);
 
 /// Tangency (max-Sharpe) weights S^-1 (mu - rf 1) / (A - rf C).
-/// \throws std::domain_error if A - rf*C <= 0 — the tangency portfolio is
-///   undefined when the risk-free rate is at or above the minimum-variance
-///   return (in particular when rf exceeds every expected return).
+/// \throws TangencyUndefinedError if A - rf*C <= kTangencyCondRtol *
+///   max(|A|, |rf|*C): the tangency portfolio is undefined when the
+///   risk-free rate is at or above the minimum-variance return A/C (in
+///   particular when rf exceeds every expected return) and numerically
+///   meaningless when rf sits within a relative 1e-6 of A/C (the weights
+///   scale like 1/(A - rf C) and reach gross leverage of 1e6+).
+/// \throws std::invalid_argument on malformed inputs (non-finite rf, ...).
 Vector tangency_weights(const Vector& mu, const Matrix& sigma, double rf);
+
+/// Gross exposure sum_i |w_i| (1.0 for any long-only portfolio); a desk
+/// should cap it before unconstrained weights reach an OMS.
+/// \throws std::invalid_argument on an empty or non-finite vector.
+double gross_leverage(const Vector& w);
 
 /// Efficient-frontier weights for a target return via the two-fund theorem.
 /// \throws std::domain_error if n = 1 and the target differs from the
@@ -66,13 +87,15 @@ Vector frontier_weights(const Vector& mu, const Matrix& sigma, double target);
 
 /// Frontier sweep output: n_points targets, weight rows, variances.
 struct FrontierResult {
-  Vector targets;    ///< Pinned grid lo + k*(hi-lo)/(n_points-1).
+  Vector targets;    ///< Pinned grid lo + k*(hi-lo)/(n_points-1), last point exactly hi.
   Matrix weights;    ///< n_points x n weight matrix (one row per target).
   Vector variances;  ///< w' Sigma w per target.
 };
 
 /// Unconstrained frontier sweep over the pinned grid from the
-/// minimum-variance return A/C to max(mu) inclusive (API_SPEC 3.4).
+/// minimum-variance return A/C to max(mu) inclusive (API_SPEC 3.4); the
+/// two-fund generators g, h are computed once and reused.
+/// \throws std::domain_error if max(mu) <= A/C ("frontier grid empty").
 FrontierResult efficient_frontier(const Vector& mu, const Matrix& sigma,
                                   int n_points = 25);
 
@@ -83,7 +106,7 @@ FrontierResult efficient_frontier(const Vector& mu, const Matrix& sigma,
 /// breakpoints, brackets g(t) = total and finishes with one exact linear
 /// interpolation — finite and deterministic (no iteration tolerance).
 /// Bound vectors must have length n; defaults (empty vectors) mean lb = 0
-/// and ub = +inf (long-only simplex).
+/// and ub = +inf (long-only simplex). Lower bounds must be finite.
 /// \throws std::invalid_argument if bounds are infeasible
 ///   (sum(lb) > total, sum(ub) < total, or any lb_i > ub_i) or inputs are
 ///   non-finite/empty.
@@ -93,54 +116,56 @@ Vector project_simplex_box(const Vector& v, double total = 1.0,
 /// Convenience overload with uniform scalar bounds.
 Vector project_simplex_box(const Vector& v, double total, double lb, double ub);
 
-/// PGD output: minimizer, iterations executed, convergence flag.
-struct PgdResult {
-  Vector w;
-  int iterations;
-  bool converged;  ///< false when the iteration cap was hit (reported, not thrown).
+/// Range [r_min, r_max] of mu'w over {sum w = 1, lb <= w <= ub}; both
+/// extremes are vertices found by the pinned greedy fill (assets in
+/// ascending / descending mu order, ties by index). Empty bound vectors
+/// mean lb = 0, ub = +inf.
+std::pair<double, double> attainable_return_range(const Vector& mu,
+                                                  const Vector& lb = Vector(),
+                                                  const Vector& ub = Vector());
+
+/// Output of the active-set QP solvers.
+struct QpResult {
+  Vector weights;       ///< Feasible weights (bounds exact, equalities to rounding).
+  int iterations;       ///< Dual active-set iterations (constraint adds/drops).
+  bool converged;       ///< KKT certificate holds at `weights` (see kQpConvTol).
+  double kkt_residual;  ///< Largest KKT violation: equality residuals, bound violations, |S w - N u|.
 };
 
-/// Projected gradient descent with monotone backtracking (pinned,
-/// API_SPEC 3.6):
-/// 1. w = project(w0); step t = 1.
-/// 2. Each iteration: t = 2t; g = grad(w); w+ = project(w - t g); while
-///    the sufficient-decrease test
-///    f(w+) <= f(w) + g.(w+ - w) + ||w+ - w||^2 / (2t) fails, halve t and
-///    recompute w+ (at most 100 halvings, then accept).
-/// 3. Stop when max_i |w+_i - w_i| < tol (converged) or after max_iter
-///    iterations (flag reported, never thrown).
-/// Deterministic — no randomness anywhere.
-PgdResult pgd_minimize(const std::function<double(const Vector&)>& fun,
-                       const std::function<Vector(const Vector&)>& grad,
-                       const std::function<Vector(const Vector&)>& project,
-                       const Vector& w0, double tol = kPgdTol,
-                       int max_iter = kPgdMaxIter);
+/// Constrained minimum variance min 1/2 w'Sw over {sum w = 1, lb <= w <= ub}
+/// (defaults: long-only, lb = 0, ub = +inf), solved by the pinned dual
+/// active-set QP. Strictly convex: the minimizer is unique.
+QpResult min_variance_longonly_solve(const Matrix& sigma, const Vector& lb = Vector(),
+                                     const Vector& ub = Vector(),
+                                     int max_iter = kQpMaxIter);
 
-/// Constrained minimum variance: min 1/2 w'Sw over the box-simplex
-/// (defaults: long-only, lb = 0, ub = +inf), solved by the pinned PGD
-/// started from projected equal weights. Strictly convex, so the
-/// minimizer is unique and ports agree well below the golden tolerance.
+/// Weights of min_variance_longonly_solve.
+/// \throws std::domain_error if the solver did not certify convergence.
 Vector min_variance_longonly(const Matrix& sigma, const Vector& lb = Vector(),
-                             const Vector& ub = Vector(), double tol = kPgdTol,
-                             int max_iter = kPgdMaxIter);
+                             const Vector& ub = Vector(), int max_iter = kQpMaxIter);
 
-/// Constrained frontier point via the pinned quadratic-penalty PGD
-/// objective f(w) = 1/2 w' Sigma w + penalty/2 (mu.w - target)^2 with
-/// penalty = 1e4 by default. The penalty formulation itself is the
-/// contract: golden values are the minimizer of THIS objective (achieved
-/// return deviates from the target by O(1/penalty) by design).
-Vector constrained_frontier_weights(const Vector& mu, const Matrix& sigma,
-                                    double target, double penalty = kFrontierPenalty,
+/// Constrained frontier point: min 1/2 w'Sw subject to sum w = 1,
+/// mu'w = target and lb <= w <= ub. The target is met exactly (to
+/// rounding) — there is no penalty term.
+/// \throws std::domain_error if the target lies below the constrained
+///   minimum-variance return (inefficient branch) or above the maximum
+///   attainable return under the bounds.
+QpResult constrained_frontier_solve(const Vector& mu, const Matrix& sigma, double target,
+                                    const Vector& lb = Vector(), const Vector& ub = Vector(),
+                                    int max_iter = kQpMaxIter);
+
+/// Weights of constrained_frontier_solve.
+/// \throws std::domain_error if the solver did not certify convergence.
+Vector constrained_frontier_weights(const Vector& mu, const Matrix& sigma, double target,
                                     const Vector& lb = Vector(),
-                                    const Vector& ub = Vector(), double tol = kPgdTol,
-                                    int max_iter = kPgdMaxIter);
+                                    const Vector& ub = Vector(), int max_iter = kQpMaxIter);
 
-/// Constrained frontier sweep over the same pinned target grid as
-/// efficient_frontier (min-variance return A/C to max(mu)).
+/// Constrained frontier sweep on the pinned grid from the constrained
+/// minimum-variance return to the maximum attainable return under the
+/// bounds (n_points equally spaced targets, both ends inclusive). Every
+/// point is solved to KKT optimality; a non-converged point throws.
 FrontierResult constrained_frontier(const Vector& mu, const Matrix& sigma,
-                                    int n_points = 25,
-                                    double penalty = kFrontierPenalty,
-                                    const Vector& lb = Vector(),
-                                    const Vector& ub = Vector());
+                                    int n_points = 25, const Vector& lb = Vector(),
+                                    const Vector& ub = Vector(), int max_iter = kQpMaxIter);
 
 }  // namespace portopt

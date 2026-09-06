@@ -20,6 +20,10 @@
 /// * sharpe     = (ann_return - rf) / ann_vol (error if ann_vol < 1e-15)
 /// * max drawdown from wealth V_0 = 1, V_t = V_{t-1} (1 + r_t):
 ///   maxdd = max_t (1 - V_t / peak_t), peak includes V_0; positive fraction.
+///
+/// Every metric rejects NaN/inf, simple returns <= -1, non-positive
+/// periods and a non-finite rf (std::invalid_argument). Series sums use
+/// the compensated kahan_sum (matches the reference's math.fsum).
 #pragma once
 
 #include <functional>
@@ -35,19 +39,24 @@ constexpr int kDefaultStep = 63;
 constexpr int kAnnualization = 252;
 
 /// Arithmetic annualized return: periods * mean(r).
+/// \throws std::invalid_argument on an empty/invalid series or periods <= 0.
 double annualized_return(const Vector& r, int periods = kAnnualization);
 
 /// Annualized volatility: sqrt(periods) * std(r, ddof=1). Needs >= 2 points.
+/// \throws std::invalid_argument on an invalid series or periods <= 0.
 double annualized_vol(const Vector& r, int periods = kAnnualization);
 
 /// Annualized Sharpe (ann_return - rf) / ann_vol.
+/// \throws std::invalid_argument if rf is not finite.
 /// \throws std::domain_error if the volatility is below 1e-15.
 double sharpe_ratio(const Vector& r, double rf = 0.0, int periods = kAnnualization);
 
 /// Maximum drawdown of the compounded wealth path (positive fraction).
+/// \throws std::invalid_argument on NaN/inf or a return <= -1.
 double max_drawdown(const Vector& r);
 
-/// Pinned rebalance dates window, window+step, ... strictly below t.
+/// Pinned rebalance dates window, window+step, ... strictly below t
+/// (ceil((t - window) / step) dates; any step >= 1 is safe, no overflow).
 /// \throws std::invalid_argument if window < 2, step < 1, or t <= window.
 std::vector<std::size_t> rebalance_indices(std::size_t t, int window = kDefaultWindow,
                                            int step = kDefaultStep);
@@ -66,9 +75,10 @@ struct BacktestResult {
 };
 
 /// Quarterly expanding-window backtest with the pinned schedule.
-/// weight_fn(history) receives the expanding daily-return history (rows
-/// [0, t_k)) and must return finite weights of length n summing to 1
-/// within 1e-6 (validated; error otherwise).
+/// weight_fn(history) receives a copy of the expanding daily-return history
+/// (rows [0, t_k)) and must return finite weights of length n summing to 1
+/// within 1e-6 (validated; error otherwise). Requires T >= window + 2 (two
+/// holdout days, so that the ddof=1 volatility exists) and a finite rf.
 BacktestResult run_backtest(const Matrix& returns,
                             const std::function<Vector(const Matrix&)>& weight_fn,
                             double rf = 0.0, int window = kDefaultWindow,

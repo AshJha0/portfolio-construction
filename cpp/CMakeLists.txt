@@ -9,9 +9,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# -ffp-contract=off pins IEEE-754 semantics: no implicit FMA fusion, so
-# every a*b+c rounds like the numpy reference (explicit std::fma is still
-# used where the reference BLAS kernels fuse).
+# -ffp-contract=off pins IEEE-754 semantics (no implicit FMA fusion), so
+# every a*b+c rounds the same way on every compiler/target; nothing in the
+# library depends on it beyond last-bit reproducibility.
 add_compile_options(-Wall -Wextra -ffp-contract=off)
 
 add_library(portopt

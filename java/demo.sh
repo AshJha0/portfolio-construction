@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 if [ ! -f out/com/quant/portopt/Demo.class ]; then
-    ./build.sh
+    bash build.sh
 fi
 
 java -cp out com.quant.portopt.Demo

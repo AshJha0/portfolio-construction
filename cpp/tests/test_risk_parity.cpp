@@ -115,3 +115,52 @@ TEST(RiskParity, ErrorPaths) {
   z(1, 1) = 0.01;
   EXPECT_THROW(portopt::inverse_vol_weights(z), std::domain_error);
 }
+
+TEST(RiskParity, ErcPermutationInvariance) {
+  // PT-12: erc(P S P') == P erc(S) — a sweep-order bug would break this.
+  const Matrix& sig = testdata::sigma_ann();
+  const std::size_t perm[8] = {5, 2, 7, 0, 3, 6, 1, 4};
+  Matrix ps(8, 8, 0.0);
+  for (std::size_t i = 0; i < 8; ++i) {
+    for (std::size_t j = 0; j < 8; ++j) ps(i, j) = sig(perm[i], perm[j]);
+  }
+  const Vector w = portopt::erc_weights(sig);
+  const Vector wp = portopt::erc_weights(ps);
+  for (std::size_t i = 0; i < 8; ++i) EXPECT_NEAR(wp[i], w[perm[i]], 1e-10) << i;
+  const Vector b{0.20, 0.20, 0.15, 0.15, 0.10, 0.10, 0.05, 0.05};
+  Vector bp(8, 0.0);
+  for (std::size_t i = 0; i < 8; ++i) bp[i] = b[perm[i]];
+  const Vector wb = portopt::risk_budget_weights(sig, b);
+  const Vector wbp = portopt::risk_budget_weights(ps, bp);
+  for (std::size_t i = 0; i < 8; ++i) EXPECT_NEAR(wbp[i], wb[perm[i]], 1e-10) << i;
+}
+
+TEST(RiskParity, ErcScaleInvariance) {
+  // PT-13: daily vs annualized covariance give the same ERC weights.
+  const Matrix sig_d = portopt::sample_cov(testdata::returns_data().returns);
+  const portopt::RiskBudgetResult d = portopt::risk_budget_solve(sig_d);
+  const portopt::RiskBudgetResult a = portopt::risk_budget_solve(portopt::annualize_cov(sig_d));
+  EXPECT_TRUE(d.converged);
+  EXPECT_TRUE(a.converged);
+  for (std::size_t i = 0; i < 8; ++i) EXPECT_NEAR(d.weights[i], a.weights[i], 1e-10) << i;
+  Matrix tiny(sig_d);
+  for (std::size_t i = 0; i < 8; ++i) {
+    for (std::size_t j = 0; j < 8; ++j) tiny(i, j) *= 1e-6;
+  }
+  const portopt::RiskBudgetResult k = portopt::risk_budget_solve(tiny);
+  EXPECT_TRUE(k.converged);
+  for (std::size_t i = 0; i < 8; ++i) EXPECT_NEAR(k.weights[i], d.weights[i], 1e-10) << i;
+}
+
+TEST(RiskParity, CcdCapReportedNotThrown) {
+  const portopt::RiskBudgetResult r =
+      portopt::risk_budget_solve(testdata::sigma_ann(), Vector(), portopt::kCcdTol, 1);
+  EXPECT_FALSE(r.converged);
+  EXPECT_EQ(r.sweeps, 1);
+  double s = 0.0;
+  for (double v : r.weights) {
+    EXPECT_GT(v, 0.0);
+    s += v;
+  }
+  EXPECT_NEAR(s, 1.0, 1e-12);
+}

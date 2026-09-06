@@ -4,29 +4,26 @@
 //!
 //! * sample mean uses divisor `T`; sample covariance uses divisor `T-1`
 //!   (ddof = 1);
-//! * Ledoit-Wolf (2004) constant-correlation shrinkage with the classic
-//!   closed-form intensity; the dispersion sums (`pi`/`rho`/`gamma`) use
-//!   divisor `T` while `S` keeps divisor `T-1` — this deliberate
-//!   simplification is pinned so that every language port computes the
-//!   identical number;
+//! * Ledoit-Wolf (2004) constant-correlation shrinkage: the intensity is
+//!   computed exactly as in the paper's Appendix B / `covCor.m` (divisor
+//!   T throughout, both theta terms per ordered pair) and applied in the
+//!   ddof = 1 convention — see [`shrink_covariance`];
 //! * annualization multiplies means and covariances by 252 (configurable).
 //!
-//! The moment sums mirror the reference implementation's floating point
-//! exactly: means accumulate row by row (numpy `sum(axis=0)`) and the
-//! covariance products use the OpenBLAS dgemm accumulation order
-//! ([`crate::linalg::blas_dot`]), because downstream PGD golden values
-//! are ulp-sensitive to these inputs. The shrinkage dispersion sums use
-//! Neumaier compensation ([`crate::linalg::kahan_sum`]), which is well
-//! inside their 1e-10 tolerance.
+//! Every T-length reduction uses the compensated [`crate::linalg::kahan_sum`],
+//! which matches the reference's correctly rounded `math.fsum` to a couple
+//! of ulps; no golden value depends on a BLAS or a summation order.
 
 use crate::error::{PortOptError, Result};
 use crate::linalg::{kahan_sum, Matrix};
 
-/// Validate a `T x N` returns matrix (finite entries, `T >= min_rows`).
+/// Validate a `T x N` simple-returns matrix: finite entries strictly
+/// greater than -1 (a simple return at or below -100% is not a valid price
+/// move), `T >= min_rows`, `N >= 1`.
 ///
 /// # Errors
-/// [`PortOptError::InvalidInput`] on an empty panel, too few rows, or
-/// NaN/inf entries.
+/// [`PortOptError::InvalidInput`] on an empty panel, too few rows,
+/// NaN/inf entries, or a return `<= -1`.
 pub fn validate_returns(returns: &Matrix, min_rows: usize) -> Result<()> {
     if returns.ncols() < 1 {
         return Err(PortOptError::InvalidInput(
@@ -44,28 +41,36 @@ pub fn validate_returns(returns: &Matrix, min_rows: usize) -> Result<()> {
             "returns contain NaN or infinite entries".into(),
         ));
     }
+    for r in 0..returns.nrows() {
+        if returns.row(r).iter().any(|&v| v <= -1.0) {
+            return Err(PortOptError::InvalidInput(
+                "returns contain a simple return <= -1 (-100% or worse)".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
-/// Per-asset sample mean: `mu[i] = (1/T) * sum_t X[t][i]`.
-///
-/// Accumulated row by row (numpy's `x.sum(axis=0)` order) so the values
-/// are bit-identical to the reference implementation's.
+fn validate_periods(periods: f64) -> Result<()> {
+    if !(periods > 0.0) || !periods.is_finite() {
+        return Err(PortOptError::InvalidInput(
+            "periods must be positive and finite".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Per-asset sample mean: `mu[i] = (1/T) * sum_t X[t][i]` (compensated sum).
 pub fn sample_mean(returns: &Matrix) -> Result<Vec<f64>> {
     validate_returns(returns, 1)?;
     let (t, n) = (returns.nrows(), returns.ncols());
-    let mut acc = vec![0.0_f64; n];
-    for r in 0..t {
-        let row = returns.row(r);
-        for j in 0..n {
-            acc[j] += row[j];
-        }
-    }
-    Ok(acc.into_iter().map(|s| s / t as f64).collect())
+    Ok((0..n)
+        .map(|j| kahan_sum((0..t).map(|r| returns.get(r, j))) / t as f64)
+        .collect())
 }
 
 /// Demeaned columns of the returns panel: `xc[t][i] = X[t][i] - mu[i]`,
-/// stored column-major (`xc[i][t]`) for the T-length dot products.
+/// stored column-major (`xc[i][t]`) for the T-length reductions.
 fn demeaned_columns(returns: &Matrix) -> Result<Vec<Vec<f64>>> {
     let mu = sample_mean(returns)?;
     let (t, n) = (returns.nrows(), returns.ncols());
@@ -75,29 +80,24 @@ fn demeaned_columns(returns: &Matrix) -> Result<Vec<Vec<f64>>> {
 }
 
 /// Sample covariance with ddof = 1: `S[i][j] = (1/(T-1)) sum_t xc[t][i] xc[t][j]`.
-///
-/// The T-length products are accumulated with [`crate::linalg::blas_dot`]
-/// (the reference BLAS dgemm order), making every entry bit-identical to
-/// the Python implementation — required because downstream PGD golden
-/// values are ulp-sensitive to the covariance input.
 pub fn sample_cov(returns: &Matrix) -> Result<Matrix> {
     validate_returns(returns, 2)?;
     let xc = demeaned_columns(returns)?;
-    cov_from_demeaned(&xc, returns.nrows())
+    Ok(cov_from_demeaned(&xc, returns.nrows()))
 }
 
 /// Shared ddof = 1 covariance kernel over precomputed demeaned columns.
-fn cov_from_demeaned(xc: &[Vec<f64>], t: usize) -> Result<Matrix> {
+fn cov_from_demeaned(xc: &[Vec<f64>], t: usize) -> Matrix {
     let n = xc.len();
     let mut s = Matrix::zeros(n, n);
     for i in 0..n {
         for j in i..n {
-            let v = crate::linalg::blas_dot(&xc[i], &xc[j]) / (t - 1) as f64;
+            let v = kahan_sum((0..t).map(|r| xc[i][r] * xc[j][r])) / (t - 1) as f64;
             s.set(i, j, v);
             s.set(j, i, v);
         }
     }
-    Ok(s)
+    s
 }
 
 /// Output of Ledoit-Wolf constant-correlation shrinkage.
@@ -117,19 +117,23 @@ pub struct ShrinkageResult {
 
 /// Ledoit-Wolf (2004) shrinkage towards the constant-correlation target.
 ///
-/// Pinned term by term (API_SPEC.md section 2.2). With demeaned returns
-/// `xc[t][i]` and `S` the ddof = 1 sample covariance:
+/// Pinned term by term to Ledoit & Wolf (2004), *JPM* 30(4), Appendix B /
+/// the authors' `covCor.m` (API_SPEC.md section 2.2). With demeaned
+/// returns `x[t][i]`, `S_T = Xc'Xc / T` (divisor T) and `s_ii = S_T[i][i]`:
 ///
-/// * `rbar = (2 / (N(N-1))) * sum_{i<j} S_ij / sqrt(S_ii S_jj)`
-/// * target `F_ii = S_ii`, `F_ij = rbar * sqrt(S_ii S_jj)`
-/// * `pi_ij = (1/T) sum_t (xc_ti xc_tj - S_ij)^2`, `pi_hat = sum_ij pi_ij`
-/// * `theta_ii,ij = (1/T) sum_t (xc_ti^2 - S_ii)(xc_ti xc_tj - S_ij)`
+/// * `rbar = (2 / (N(N-1))) * sum_{i<j} S_T_ij / sqrt(s_ii s_jj)`
+/// * `pi_ij = (1/T) sum_t (x_ti x_tj - S_T_ij)^2`, `pi_hat = sum_ij pi_ij`
+/// * `theta_ii,ij = (1/T) sum_t (x_ti^2 - s_ii)(x_ti x_tj - S_T_ij)`
 /// * `rho_hat = sum_i pi_ii + sum over ordered pairs i != j of
-///   (rbar/2) sqrt(S_jj/S_ii) theta_ii,ij` (the ordered double sum
-///   supplies both symmetric terms of the classic formula exactly once)
-/// * `gamma_hat = sum_ij (F_ij - S_ij)^2`
+///   rbar * sqrt(s_jj / s_ii) * theta_ii,ij`
+/// * `gamma_hat = sum_ij (F_T_ij - S_T_ij)^2`, `F_T_ii = s_ii`,
+///   `F_T_ij = rbar sqrt(s_ii s_jj)`
 /// * `kappa = (pi_hat - rho_hat) / gamma_hat`;
 ///   `delta = max(0, min(1, kappa / T))` (`delta = 0` if `gamma_hat <= 0`)
+///
+/// The intensity is exactly the paper's; the returned matrices use the
+/// project-wide ddof = 1 convention: `sample = S = T/(T-1) S_T`,
+/// `target = F = T/(T-1) F_T`, `sigma = delta F + (1 - delta) S`.
 ///
 /// # Errors
 /// [`PortOptError::InvalidInput`] for `N < 2`, `T < 2`, non-finite input,
@@ -143,67 +147,54 @@ pub fn shrink_covariance(returns: &Matrix) -> Result<ShrinkageResult> {
         ));
     }
     let xc = demeaned_columns(returns)?;
-    let s = cov_from_demeaned(&xc, t)?;
-    let sd: Vec<f64> = (0..n).map(|i| s.get(i, i).sqrt()).collect();
-    if sd.iter().any(|&v| !(v > 0.0)) {
+    let s = cov_from_demeaned(&xc, t);
+    if (0..n).any(|i| !(s.get(i, i) > 0.0)) {
         return Err(PortOptError::InvalidInput(
             "shrinkage requires strictly positive sample variances".into(),
         ));
     }
+    let tf = t as f64;
+    // Paper convention (divisor T) for every dispersion quantity.
+    let s_t = s.scaled((tf - 1.0) / tf);
+    let var_t: Vec<f64> = (0..n).map(|i| s_t.get(i, i)).collect();
+    let sd_t: Vec<f64> = var_t.iter().map(|v| v.sqrt()).collect();
 
     let mut corr_sum = 0.0;
     for i in 0..n {
         for j in (i + 1)..n {
-            corr_sum += s.get(i, j) / (sd[i] * sd[j]);
+            corr_sum += s_t.get(i, j) / (sd_t[i] * sd_t[j]);
         }
     }
     let rbar = 2.0 * corr_sum / (n * (n - 1)) as f64;
 
-    // Constant-correlation target: F_ii = S_ii, F_ij = rbar * sd_i * sd_j.
-    let mut f = Matrix::zeros(n, n);
+    let mut f_t = Matrix::zeros(n, n);
     for i in 0..n {
         for j in 0..n {
-            if i == j {
-                f.set(i, j, s.get(i, i));
-            } else {
-                f.set(i, j, sd[i] * sd[j] * rbar);
-            }
+            f_t.set(i, j, if i == j { var_t[i] } else { rbar * sd_t[i] * sd_t[j] });
         }
     }
 
-    let tf = t as f64;
     let mut pi_hat = 0.0;
     let mut rho_hat = 0.0;
     let mut gamma_hat = 0.0;
     for i in 0..n {
+        let xi2_dev: Vec<f64> = (0..t).map(|r| xc[i][r] * xc[i][r] - var_t[i]).collect();
         for j in 0..n {
-            let sij = s.get(i, j);
+            let sij = s_t.get(i, j);
             let pij = kahan_sum((0..t).map(|r| {
                 let dev = xc[i][r] * xc[j][r] - sij;
                 dev * dev
             })) / tf;
             pi_hat += pij;
+            let gd = f_t.get(i, j) - sij;
+            gamma_hat += gd * gd;
             if i == j {
                 rho_hat += pij;
+            } else {
+                let theta_ii_ij =
+                    kahan_sum((0..t).map(|r| xi2_dev[r] * (xc[i][r] * xc[j][r] - sij))) / tf;
+                rho_hat += rbar * (var_t[j] / var_t[i]).sqrt() * theta_ii_ij;
             }
-            let df = f.get(i, j) - sij;
-            gamma_hat += df * df;
-        }
-    }
-    // theta terms over ordered pairs i != j: each unordered pair {i, j}
-    // contributes both symmetric halves of the classic rho formula, once
-    // from the (i, j) pass and once from the (j, i) pass.
-    for i in 0..n {
-        let sii = s.get(i, i);
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let sij = s.get(i, j);
-            let theta_ii_ij = kahan_sum(
-                (0..t).map(|r| (xc[i][r] * xc[i][r] - sii) * (xc[i][r] * xc[j][r] - sij)),
-            ) / tf;
-            rho_hat += (rbar / 2.0) * (s.get(j, j) / sii).sqrt() * theta_ii_ij;
         }
     }
 
@@ -214,27 +205,46 @@ pub fn shrink_covariance(returns: &Matrix) -> Result<ShrinkageResult> {
         (kappa / tf).clamp(0.0, 1.0)
     };
 
+    // Output in the project-wide ddof = 1 convention.
+    let sd: Vec<f64> = (0..n).map(|i| s.get(i, i).sqrt()).collect();
+    let mut f = Matrix::zeros(n, n);
     let mut sigma = Matrix::zeros(n, n);
     for i in 0..n {
         for j in 0..n {
-            sigma.set(i, j, intensity * f.get(i, j) + (1.0 - intensity) * s.get(i, j));
+            let fij = if i == j { s.get(i, i) } else { rbar * sd[i] * sd[j] };
+            f.set(i, j, fij);
+            sigma.set(i, j, intensity * fij + (1.0 - intensity) * s.get(i, j));
         }
     }
     Ok(ShrinkageResult { sigma, intensity, rbar, sample: s, target: f })
 }
 
 /// Annualize a per-period mean vector: `mu_ann = periods * mu`.
+///
+/// # Errors
+/// [`PortOptError::InvalidInput`] if `periods` is not positive and finite
+/// or `mu` has NaN/inf entries.
 pub fn annualize_mean(mu: &[f64], periods: f64) -> Result<Vec<f64>> {
-    if !(periods > 0.0) || !periods.is_finite() {
-        return Err(PortOptError::InvalidInput("periods must be positive".into()));
+    validate_periods(periods)?;
+    if !mu.iter().all(|v| v.is_finite()) {
+        return Err(PortOptError::InvalidInput(
+            "mu contains NaN or infinite entries".into(),
+        ));
     }
     Ok(mu.iter().map(|v| periods * v).collect())
 }
 
 /// Annualize a per-period covariance: `Sigma_ann = periods * Sigma`.
+///
+/// # Errors
+/// [`PortOptError::InvalidInput`] if `periods` is not positive and finite
+/// or `cov` has NaN/inf entries.
 pub fn annualize_cov(cov: &Matrix, periods: f64) -> Result<Matrix> {
-    if !(periods > 0.0) || !periods.is_finite() {
-        return Err(PortOptError::InvalidInput("periods must be positive".into()));
+    validate_periods(periods)?;
+    if !cov.is_finite() {
+        return Err(PortOptError::InvalidInput(
+            "cov contains NaN or infinite entries".into(),
+        ));
     }
     Ok(cov.scaled(periods))
 }
@@ -274,6 +284,8 @@ mod tests {
         assert!(shrink_covariance(&one_row).is_err());
         let constant = Matrix::from_rows(&[vec![0.01, 0.02], vec![0.01, 0.03]]).unwrap();
         assert!(shrink_covariance(&constant).is_err()); // zero variance col 0
+        let loss = Matrix::from_rows(&[vec![0.01, -1.0], vec![0.01, 0.03]]).unwrap();
+        assert!(sample_mean(&loss).is_err()); // simple return <= -1
     }
 
     #[test]
@@ -281,6 +293,8 @@ mod tests {
         let mu = annualize_mean(&[0.001], 252.0).unwrap();
         assert!((mu[0] - 0.252).abs() < 1e-15);
         assert!(annualize_mean(&[0.1], 0.0).is_err());
+        assert!(annualize_mean(&[0.1], f64::NAN).is_err());
+        assert!(annualize_mean(&[f64::NAN], 252.0).is_err());
         assert!(annualize_cov(&Matrix::identity(2), -1.0).is_err());
     }
 }

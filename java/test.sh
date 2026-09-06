@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 JUNIT=/usr/share/java/junit4.jar
 HAMCREST=/usr/share/java/hamcrest.jar
 
-./build.sh
+bash build.sh
 
 java -cp "out:$JUNIT:$HAMCREST" org.junit.runner.JUnitCore \
     com.quant.portopt.LinalgTest \

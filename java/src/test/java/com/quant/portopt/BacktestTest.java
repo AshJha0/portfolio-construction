@@ -75,6 +75,68 @@ public class BacktestTest {
     }
 
     @Test
+    public void metricsRejectBadRfPeriodsAndTotalLoss() {
+        // PT-15 / MIN-13 / MAJ-5: descriptive errors, never NaN.
+        double[] r = {0.01, -0.02, 0.015, 0.0, 0.005};
+        assertThrows(IllegalArgumentException.class, () -> Backtest.sharpeRatio(r, Double.NaN, 252));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.sharpeRatio(r, Double.POSITIVE_INFINITY, 252));
+        assertThrows(IllegalArgumentException.class, () -> Backtest.annualizedVol(r, -1));
+        assertThrows(IllegalArgumentException.class, () -> Backtest.annualizedVol(r, 0));
+        assertThrows(IllegalArgumentException.class, () -> Backtest.annualizedReturn(r, 0));
+        assertThrows(IllegalArgumentException.class, () -> Backtest.maxDrawdown(new double[] {-1.5}));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.maxDrawdown(new double[] {0.1, -1.0, 0.2}));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.annualizedReturn(new double[] {0.1, -1.2}, 252));
+        assertEquals(0.999, Backtest.maxDrawdown(new double[] {-0.999}), 1e-15);
+    }
+
+    @Test
+    public void minimalSample() {
+        // PT-10: T = window + 2 is the smallest valid backtest; T = window + 1
+        // raises the explicit schedule error although the schedule itself exists.
+        double[][] x = TestData.returns();
+        double[][] x502 = java.util.Arrays.copyOf(x, 502);
+        Backtest.Result r = Backtest.runBacktest(x502, equalWeight(), 0.02, 500, 63);
+        assertEquals(List.of(500), r.rebalanceDates());
+        assertEquals(2, r.portfolioReturns().length);
+        assertEquals(0, r.turnovers().length);
+        assertEquals(0.0, r.avgTurnover(), 0.0);
+        assertTrue(Double.isFinite(r.sharpe()) && Double.isFinite(r.annVol()));
+        double[][] x501 = java.util.Arrays.copyOf(x, 501);
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.runBacktest(x501, equalWeight(), 0.02, 500, 63));
+        assertThrows(IllegalArgumentException.class,
+                () -> Backtest.runBacktest(x502, equalWeight(), Double.NaN, 500, 63));
+    }
+
+    @Test
+    public void rebalanceIndicesNoOverflow() {
+        // PT-16: a step near Integer.MAX_VALUE must not overflow into an infinite loop.
+        assertEquals(List.of(500), Backtest.rebalanceIndices(1250, 500, Integer.MAX_VALUE));
+        assertEquals(List.of(500), Backtest.rebalanceIndices(1250, 500, 750));
+        assertEquals(List.of(500, 1250), Backtest.rebalanceIndices(1251, 500, 750));
+        assertEquals(750, Backtest.rebalanceIndices(1250, 500, 1).size());
+        assertEquals(List.of(2), Backtest.rebalanceIndices(Integer.MAX_VALUE, 2, Integer.MAX_VALUE));
+    }
+
+    @Test
+    public void historyIsACopy() {
+        // A mutating strategy cannot corrupt the panel for later rebalances.
+        double[][] x = java.util.Arrays.copyOf(TestData.returns(), 600);
+        double before = x[0][0];
+        Backtest.Result r = Backtest.runBacktest(x, h -> {
+            h[0][0] = 99.0;
+            double[] w = new double[h[0].length];
+            java.util.Arrays.fill(w, 1.0 / h[0].length);
+            return w;
+        }, 0.0, 500, 63);
+        assertEquals(List.of(500, 563), r.rebalanceDates());
+        assertEquals(before, x[0][0], 0.0);
+    }
+
+    @Test
     public void accountingIdentity() {
         // The daily portfolio return of a block must be exactly w . r_t with the
         // weight vector active for that block.
@@ -86,9 +148,9 @@ public class BacktestTest {
             int tK = dates.get(k);
             int tEnd = (k + 1 < dates.size()) ? dates.get(k + 1) : x.length;
             for (int row : new int[] {tK, tEnd - 1}) {
-                // w . r_t, up to the reduction order of the pinned matvec kernel
+                // w . r_t, up to the summation order (compensated vs plain)
                 double expect = Linalg.dot(res.weights()[k], x[row]);
-                assertEquals("row " + row, expect, res.portfolioReturns()[row - 500], 1e-15);
+                assertEquals("row " + row, expect, res.portfolioReturns()[row - 500], 1e-16);
             }
         }
         // Metrics are recomputable from the returned series (identity check).

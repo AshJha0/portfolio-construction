@@ -16,6 +16,5 @@
   "estimation_window": 500,
   "rebalance_step": 63,
   "frontier_points": 25,
-  "frontier_penalty": 10000.0,
   "seed": 42
 }

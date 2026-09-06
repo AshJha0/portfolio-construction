@@ -7,6 +7,7 @@
 /// Prints: estimator table, unconstrained + long-only frontier sweep,
 /// Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
 /// contributions, and a quarterly-rebalance comparison across six methods.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <exception>
@@ -90,20 +91,27 @@ int main(int argc, char** argv) {
     }
 
     // ------------------------------------------------------------- frontier
-    rule("Efficient frontier sweep (25 points, showing every 4th)");
+    rule("Efficient frontier sweeps (25 points each, showing every 4th)");
     const portopt::FrontierResult fu =
         portopt::efficient_frontier(mu, sig, cfg.frontier_points);
     const portopt::FrontierResult fc =
         portopt::constrained_frontier(mu, sig, cfg.frontier_points);
-    std::printf("%8s%11s%15s\n", "target", "vol uncon", "vol long-only");
+    std::printf("unconstrained grid: A/C .. max(mu);  long-only grid: constrained GMV .. max(mu)\n");
+    std::printf("%8s%11s%10s%15s\n", "target", "vol uncon", "target", "vol long-only");
     for (std::size_t k = 0; k < fu.targets.size(); k += 4) {
-      std::printf("%8.4f%11.4f%15.4f\n", fu.targets[k], std::sqrt(fu.variances[k]),
-                  std::sqrt(fc.variances[k]));
+      std::printf("%8.4f%11.4f%10.4f%15.4f\n", fu.targets[k], std::sqrt(fu.variances[k]),
+                  fc.targets[k], std::sqrt(fc.variances[k]));
     }
+    double gap = 0.0;
+    for (std::size_t k = 0; k < fc.targets.size(); ++k) {
+      gap = std::max(gap, std::fabs(portopt::dot(mu, fc.weights.row(k)) - fc.targets[k]));
+    }
+    std::printf("long-only targets met exactly: max |mu'w - target| = %.1e\n", gap);
     const Vector w_tan = portopt::tangency_weights(mu, sig, rf);
     const double tan_sharpe = (portopt::dot(mu, w_tan) - rf) /
                               std::sqrt(portopt::dot(w_tan, portopt::mat_vec(sig, w_tan)));
-    std::printf("tangency (rf=%.2f%%): sharpe = %.4f\n", 100.0 * rf, tan_sharpe);
+    std::printf("tangency (rf=%.2f%%): sharpe = %.4f, gross leverage = %.2f\n", 100.0 * rf,
+                tan_sharpe, portopt::gross_leverage(w_tan));
 
     // ------------------------------------------------------ black-litterman
     rule("Black-Litterman: prior (equilibrium) vs posterior weights");
@@ -132,6 +140,7 @@ int main(int argc, char** argv) {
     wrow("mu posterior", bl.mu_post);
     wrow("w market", w_mkt);
     wrow("w posterior", w_bl);
+    std::printf("posterior gross leverage = %.4f\n", portopt::gross_leverage(w_bl));
 
     // ---------------------------------------------------------- risk parity
     rule("Risk contributions: ERC vs inverse-vol");
@@ -168,13 +177,14 @@ int main(int argc, char** argv) {
     };
     const auto tangency_fn = [&](const Matrix& h) {
       // Pinned backtest method: tangency, falling back to unconstrained
-      // min-variance for a rebalance where tangency is undefined
-      // (A - rf*C <= 0) — reported, not crashed (API_SPEC 6.3).
+      // min-variance for a rebalance where tangency is undefined or
+      // ill-conditioned — reported, not crashed (API_SPEC 6.3). Any other
+      // error (e.g. a singular covariance) propagates.
       const Matrix s = portopt::annualize_cov(portopt::sample_cov(h));
       try {
         return portopt::tangency_weights(
             portopt::annualize_mean(portopt::sample_mean(h)), s, rf);
-      } catch (const std::domain_error&) {
+      } catch (const portopt::TangencyUndefinedError&) {
         ++tangency_fallbacks;
         return portopt::min_variance_weights(s);
       }
@@ -206,8 +216,8 @@ int main(int argc, char** argv) {
     }
     if (tangency_fallbacks > 0) {
       std::printf(
-          "note: tangency undefined at %d rebalance date(s) (rf above min-var "
-          "return); fell back to min-variance there.\n",
+          "note: tangency undefined/ill-conditioned at %d rebalance date(s) (rf at or "
+          "above the min-var return); fell back to min-variance there.\n",
           tangency_fallbacks);
     }
 

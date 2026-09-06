@@ -10,6 +10,8 @@ import pytest
 
 import portopt as po
 
+GOLDEN_CASE_COUNT = 23
+
 
 def _vec(expect: dict, prefix: str) -> np.ndarray:
     keys = sorted(
@@ -44,7 +46,17 @@ def check(expect: dict, got: dict, tol: float) -> None:
 
 
 def test_golden_case_count(golden):
-    assert len(golden) >= 20
+    assert len(golden) == GOLDEN_CASE_COUNT
+
+
+def test_every_golden_case_is_asserted(golden):
+    """Guard: each case name is referenced by exactly one test below."""
+    import inspect
+    import sys
+
+    src = inspect.getsource(sys.modules[__name__])
+    for name in golden:
+        assert f'"{name}"' in src, f"golden case {name} has no test"
 
 
 def test_sample_moments_daily(golden, ctx):
@@ -96,6 +108,7 @@ def test_tangency_unconstrained(golden, ctx):
     assert np.allclose(w, _vec(c["expect"], "w"), atol=c["tol"])
     sharpe = (ctx["mu"] @ w - rf) / np.sqrt(w @ ctx["sig"] @ w)
     assert sharpe == pytest.approx(c["expect"]["sharpe"], abs=c["tol"])
+    assert po.gross_leverage(w) == pytest.approx(c["expect"]["gross_leverage"], abs=c["tol"])
 
 
 def test_frontier_point(golden, ctx):
@@ -105,18 +118,40 @@ def test_frontier_point(golden, ctx):
     assert w @ ctx["sig"] @ w == pytest.approx(c["expect"]["variance"], abs=c["tol"])
 
 
-def test_minvar_longonly_pgd(golden, ctx):
-    c = golden["minvar_longonly_pgd"]
+def test_minvar_longonly_qp(golden, ctx):
+    c = golden["minvar_longonly_qp"]
+    res = po.min_variance_longonly_solve(ctx["sig"])
+    assert res.converged
+    assert np.allclose(res.weights, _vec(c["expect"], "w"), atol=c["tol"])
     w = po.min_variance_longonly(ctx["sig"])
+    assert w @ ctx["sig"] @ w == pytest.approx(c["expect"]["variance"], abs=c["tol"])
+
+
+def test_minvar_box_qp(golden, ctx):
+    c = golden["minvar_box_qp"]
+    w = po.min_variance_longonly(ctx["sig"], lb=c["inputs"]["lb"], ub=c["inputs"]["ub"])
     assert np.allclose(w, _vec(c["expect"], "w"), atol=c["tol"])
+    assert w @ ctx["sig"] @ w == pytest.approx(c["expect"]["variance"], abs=c["tol"])
 
 
 def test_frontier_constrained(golden, ctx):
     c = golden["frontier_constrained_t080"]
+    res = po.constrained_frontier_solve(ctx["mu"], ctx["sig"], c["inputs"]["target"])
+    assert res.converged
+    assert np.allclose(res.weights, _vec(c["expect"], "w"), atol=c["tol"])
+    w = res.weights
+    assert w @ ctx["sig"] @ w == pytest.approx(c["expect"]["variance"], abs=c["tol"])
+    assert ctx["mu"] @ w == pytest.approx(c["inputs"]["target"], abs=1e-12)
+
+
+def test_frontier_constrained_box(golden, ctx):
+    c = golden["frontier_constrained_box_t060"]
     w = po.constrained_frontier_weights(
-        ctx["mu"], ctx["sig"], c["inputs"]["target"], penalty=c["inputs"]["penalty"]
+        ctx["mu"], ctx["sig"], c["inputs"]["target"], lb=c["inputs"]["lb"], ub=c["inputs"]["ub"]
     )
     assert np.allclose(w, _vec(c["expect"], "w"), atol=c["tol"])
+    assert w @ ctx["sig"] @ w == pytest.approx(c["expect"]["variance"], abs=c["tol"])
+    assert ctx["mu"] @ w == pytest.approx(c["inputs"]["target"], abs=1e-12)
 
 
 def test_cholesky_annualized_cov(golden, ctx):
@@ -229,3 +264,22 @@ def test_backtest_golden(golden, ctx):
         "n_rebalances": float(len(res.rebalance_dates)),
     }
     check(c["expect"], got, c["tol"])
+
+
+def test_qp_goldens_are_input_stable(golden, ctx):
+    """Scaling the returns by (1 + 2^-52) must move the QP goldens by far
+    less than their tolerance — the solver is an exact function of the
+    active set, not a truncated iteration (was 1.9e-8 with the old PGD)."""
+    x2 = ctx["x"] * (1.0 + 2.0 ** -52)
+    sig2 = po.annualize_cov(po.sample_cov(x2))
+    c = golden["minvar_longonly_qp"]
+    assert np.max(np.abs(po.min_variance_longonly(sig2) - _vec(c["expect"], "w"))) < 1e-13
+    c = golden["turnover_minvar_longonly"]
+    res = po.run_backtest(
+        x2,
+        lambda h: po.min_variance_longonly(po.annualize_cov(po.sample_cov(h))),
+        rf=0.0,
+        window=500,
+        step=63,
+    )
+    assert abs(res.avg_turnover - c["expect"]["avg_turnover"]) < 1e-12

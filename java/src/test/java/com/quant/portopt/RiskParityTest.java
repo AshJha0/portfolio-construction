@@ -150,4 +150,49 @@ public class RiskParityTest {
         double[] w2 = RiskParity.ercWeights(TestData.sigmaAnnualized());
         assertArrayEquals("bit-identical repeated runs", w1, w2, 0.0);
     }
+
+    @Test
+    public void ercPermutationInvariance() {
+        // PT-12: erc(P S P') == P erc(S) — a sweep-order bug would break this.
+        double[][] sig = TestData.sigmaAnnualized();
+        int[] perm = {5, 2, 7, 0, 3, 6, 1, 4};
+        double[][] ps = new double[8][8];
+        for (int i = 0; i < 8; i++) {
+            for (int j = 0; j < 8; j++) {
+                ps[i][j] = sig[perm[i]][perm[j]];
+            }
+        }
+        double[] w = RiskParity.ercWeights(sig);
+        double[] wp = RiskParity.ercWeights(ps);
+        double[] b = {0.20, 0.20, 0.15, 0.15, 0.10, 0.10, 0.05, 0.05};
+        double[] bp = new double[8];
+        for (int i = 0; i < 8; i++) {
+            bp[i] = b[perm[i]];
+        }
+        double[] wb = RiskParity.riskBudgetWeights(sig, b);
+        double[] wbp = RiskParity.riskBudgetWeights(ps, bp);
+        for (int i = 0; i < 8; i++) {
+            assertEquals("erc " + i, w[perm[i]], wp[i], 1e-10);
+            assertEquals("budget " + i, wb[perm[i]], wbp[i], 1e-10);
+        }
+    }
+
+    @Test
+    public void ercScaleInvariance() {
+        // PT-13: daily vs annualized covariance give the same ERC weights.
+        double[][] sigD = Estimators.sampleCov(TestData.returns());
+        RiskParity.Solution d = RiskParity.riskBudgetSolve(sigD, null, RiskParity.CCD_TOL, RiskParity.CCD_MAX_SWEEPS);
+        RiskParity.Solution a = RiskParity.riskBudgetSolve(
+                Estimators.annualizeCov(sigD, 252), null, RiskParity.CCD_TOL, RiskParity.CCD_MAX_SWEEPS);
+        double[][] tiny = new double[8][8];
+        for (int i = 0; i < 8; i++) {
+            for (int j = 0; j < 8; j++) {
+                tiny[i][j] = sigD[i][j] * 1e-6;
+            }
+        }
+        RiskParity.Solution k = RiskParity.riskBudgetSolve(tiny, null, RiskParity.CCD_TOL, RiskParity.CCD_MAX_SWEEPS);
+        assertTrue(d.converged() && a.converged() && k.converged());
+        assertArrayEquals(d.weights(), a.weights(), 1e-10);
+        assertArrayEquals(d.weights(), k.weights(), 1e-10);
+    }
 }

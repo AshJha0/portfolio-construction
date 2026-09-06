@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 
 #include "portopt/backtest.hpp"
 #include "test_data.hpp"
@@ -112,4 +113,55 @@ TEST(Backtest, ErrorPaths) {
   // Metrics on empty / too-short series.
   EXPECT_THROW(portopt::annualized_return(Vector{}), std::invalid_argument);
   EXPECT_THROW(portopt::annualized_vol(Vector{0.01}), std::invalid_argument);
+}
+
+TEST(Backtest, MetricsRejectBadRfPeriodsAndTotalLoss) {
+  // PT-15 / MIN-13 / MAJ-5: descriptive errors, never NaN.
+  const Vector r{0.01, -0.02, 0.015, 0.0, 0.005};
+  EXPECT_THROW(portopt::sharpe_ratio(r, std::nan("")), std::invalid_argument);
+  EXPECT_THROW(portopt::sharpe_ratio(r, std::numeric_limits<double>::infinity()),
+               std::invalid_argument);
+  EXPECT_THROW(portopt::annualized_vol(r, -1), std::invalid_argument);
+  EXPECT_THROW(portopt::annualized_vol(r, 0), std::invalid_argument);
+  EXPECT_THROW(portopt::annualized_return(r, 0), std::invalid_argument);
+  EXPECT_THROW(portopt::max_drawdown(Vector{-1.5}), std::invalid_argument);
+  EXPECT_THROW(portopt::max_drawdown(Vector{0.1, -1.0, 0.2}), std::invalid_argument);
+  EXPECT_THROW(portopt::annualized_return(Vector{0.1, -1.2}), std::invalid_argument);
+  EXPECT_NEAR(portopt::max_drawdown(Vector{-0.999}), 0.999, 1e-15);
+}
+
+TEST(Backtest, MinimalSample) {
+  // PT-10: T = window + 2 is the smallest valid backtest; T = window + 1
+  // raises the explicit schedule error although the schedule itself exists.
+  const Matrix& x = testdata::returns_data().returns;
+  const auto equal_fn = [](const Matrix& h) {
+    return Vector(h.cols(), 1.0 / static_cast<double>(h.cols()));
+  };
+  Matrix x502(502, x.cols());
+  for (std::size_t r = 0; r < 502; ++r) {
+    for (std::size_t c = 0; c < x.cols(); ++c) x502(r, c) = x(r, c);
+  }
+  const portopt::BacktestResult r = portopt::run_backtest(x502, equal_fn, 0.02, 500, 63);
+  ASSERT_EQ(r.rebalance_dates.size(), 1u);
+  EXPECT_EQ(r.portfolio_returns.size(), 2u);
+  EXPECT_TRUE(r.turnovers.empty());
+  EXPECT_EQ(r.avg_turnover, 0.0);
+  EXPECT_TRUE(std::isfinite(r.sharpe) && std::isfinite(r.ann_vol));
+  EXPECT_EQ(portopt::rebalance_indices(501, 500, 63), std::vector<std::size_t>{500});
+  Matrix x501(501, x.cols());
+  for (std::size_t rr = 0; rr < 501; ++rr) {
+    for (std::size_t c = 0; c < x.cols(); ++c) x501(rr, c) = x(rr, c);
+  }
+  EXPECT_THROW(portopt::run_backtest(x501, equal_fn, 0.02, 500, 63), std::invalid_argument);
+  EXPECT_THROW(portopt::run_backtest(x502, equal_fn, std::nan(""), 500, 63),
+               std::invalid_argument);
+}
+
+TEST(Backtest, RebalanceIndicesHugeStepTerminates) {
+  // PT-16: a step larger than the sample yields the single date `window`.
+  EXPECT_EQ(portopt::rebalance_indices(1250, 500, std::numeric_limits<int>::max()),
+            std::vector<std::size_t>{500});
+  EXPECT_EQ(portopt::rebalance_indices(1250, 500, 750), std::vector<std::size_t>{500});
+  EXPECT_EQ(portopt::rebalance_indices(1251, 500, 750), (std::vector<std::size_t>{500, 1250}));
+  EXPECT_EQ(portopt::rebalance_indices(1250, 500, 1).size(), 750u);
 }

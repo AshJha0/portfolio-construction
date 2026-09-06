@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>portfolio-construction — Markowitz, Black-Litterman and risk parity in Python, C++, Rust and Java</title>
+<!-- GitHub Pages landing page. If the repository is renamed, update the
+     github.com/AshJha0/portfolio-construction links below to match. -->
+<style>
+:root{--teal:#16697a;--green:#16a085;--ink:#1a1a2e;--muted:#556}
+body{font-family:'Segoe UI',Arial,sans-serif;margin:0;color:var(--ink);background:#f7f8fa}
+header{background:var(--teal);color:#fff;padding:3rem 2rem}
+header h1{margin:0 0 .5rem;font-size:2.2rem}
+header p{margin:0;max-width:52rem;opacity:.92;line-height:1.5}
+.wrap{max-width:64rem;margin:0 auto;padding:0 2rem}
+nav{margin-top:1.2rem}
+nav a{display:inline-block;background:var(--green);color:#fff;text-decoration:none;
+  padding:.55rem 1.1rem;margin:.25rem .6rem .25rem 0;border-radius:4px;font-weight:600}
+nav a.secondary{background:rgba(255,255,255,.15)}
+h2{color:var(--teal);border-bottom:2px solid #e3e8ec;padding-bottom:.3rem;margin-top:2.5rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(17rem,1fr));gap:1rem;margin:1.2rem 0}
+.card{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);padding:1rem 1.2rem;border-radius:4px}
+.card h3{margin:.1rem 0 .5rem;font-size:1.02rem;color:var(--teal)}
+.card p{margin:0;font-size:.9rem;color:var(--muted);line-height:1.45}
+pre{background:#10222a;color:#d7e3ea;padding:1rem 1.2rem;border-radius:4px;overflow-x:auto;
+  font-size:.85rem;line-height:1.5}
+.numbers{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);border-radius:4px;
+  padding:1rem 1.4rem;font-family:Consolas,monospace;font-size:.88rem;line-height:1.7}
+.numbers table{border-collapse:collapse}
+.numbers td{padding:.05rem 1.2rem .05rem 0;vertical-align:top}
+.numbers td:first-child{color:var(--teal);white-space:nowrap}
+.honest{background:#fff8ec;border-left:4px solid var(--green);padding:.8rem 1.2rem;
+  border-radius:4px;font-size:.92rem;line-height:1.55;margin:1.2rem 0}
+footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>portfolio-construction</h1>
+    <p>A four-language reference implementation (Python reference, C++, Rust, Java) of classical portfolio construction: sample and Ledoit-Wolf shrinkage estimators, closed-form and box-constrained Markowitz mean-variance optimisation via a finite dual active-set QP, Black-Litterman posterior blending, risk parity and risk budgeting by cyclical coordinate descent, and a quarterly expanding-window backtest on a bundled 8-asset, 1250-day universe. Every numerical algorithm is pinned in API_SPEC.md — Cholesky variant, simplex-projection breakpoint scan, the QP and its KKT certificate, the CCD update, Ledoit-Wolf sums term by term — so the scipy/LAPACK-free ports agree with the Python reference on 23 golden cases.</p>
+    <nav>
+      <a href="https://github.com/AshJha0/portfolio-construction/blob/main/LEARN.md">Learn (guide)</a>
+      <a class="secondary" href="https://github.com/AshJha0/portfolio-construction/blob/main/COOKBOOK.md">Cookbook</a>
+      <a class="secondary" href="https://github.com/AshJha0/portfolio-construction/blob/main/docs/ARCHITECTURE.md">Architecture</a>
+      <a class="secondary" href="https://github.com/AshJha0/portfolio-construction/blob/main/API_SPEC.md">API contract</a>
+      <a class="secondary" href="https://github.com/AshJha0/portfolio-construction#references">References</a>
+      <a class="secondary" href="https://github.com/AshJha0/portfolio-construction">GitHub</a>
+      <a class="secondary" href="https://ashjha0.github.io/quant-portfolio/">Quant portfolio</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <h2>Measured, not claimed</h2>
+  <div class="numbers"><table>
+    <tr><td>Cross-language parity</td><td>python 114 · cpp 90 · rust 58 · java 108 tests — 370 green</td></tr>
+    <tr><td>Golden suite</td><td>23 named cases in <code>golden.json</code>; every suite asserts the exact case count and |got − expect| ≤ tol: analytic quantities 1e-10 to 1e-12, QP cases 1e-10, CCD and backtest metrics 1e-8/1e-9</td></tr>
+    <tr><td>Generator validation</td><td>closed forms vs <code>numpy.linalg.lstsq</code> · Ledoit-Wolf intensity vs a transcription of the authors' <code>covCor.m</code> · 4 QP cases vs scipy SLSQP with KKT residual &lt; 1e-12 · ERC equal-contribution identity · both Black-Litterman limits</td></tr>
+    <tr><td>QP certificate</td><td>Goldfarb-Idnani dual active-set with closed-form polish; <code>converged</code>, <code>kkt_residual</code>, <code>iterations</code> returned; long-only targets met exactly (demo max |mu'w − target| = 2.8e-17); scaling inputs by 1 + 2^−52 moves goldens by &lt; 1e-13</td></tr>
+    <tr><td>Stress-tested</td><td>QP vs brute-force active-set enumeration (n = 4) and ~1500 random problems with n ≤ 20, κ ≤ 1e5, tied returns, tight caps and fixed assets — no failures</td></tr>
+    <tr><td>Determinism</td><td>no RNG anywhere in the library; repeated runs are bit-identical; only <code>generate_data.py</code> draws (numpy <code>default_rng(42)</code>); T-length sums correctly rounded (Python <code>fsum</code>) or Neumaier-compensated (ports), so goldens are BLAS-independent</td></tr>
+    <tr><td>Pinned numerics</td><td>Cholesky-Banachiewicz with relative pivot gate 1e-13 · tangency guard: rf within 1e-6 of A/C raises · CCD tol 1e-10, ≤ 10,000 sweeps (cap reported, not raised) · 25-point frontier grid · backtest window 500, step 63, 252 periods/year</td></tr>
+    <tr><td>Demo, honestly</td><td>tangency turns over 18.2× NAV per quarterly rebalance vs 0.005 for ERC and carries 4.14× gross leverage; tangency undefined at 8 rebalance dates and fell back to min-variance — the estimation-error story in one line</td></tr>
+  </table></div>
+
+  <div class="honest"><strong>What the latest review found and fixed.</strong> Two correctness defects in the original design. First, the Ledoit-Wolf constant-correlation intensity kept a weight of <code>rbar/2</code> on <code>theta_ii,ij</code> per <em>ordered</em> pair, halving the paper's correction and over-shrinking by 31 % on the bundled data (0.00943 instead of 0.00721); the sums now follow Ledoit &amp; Wolf (2004) Appendix B / <code>covCor.m</code> term by term and the suites check them against a direct transcription. Second, the constrained frontier was solved by projected gradient descent on a quadratic penalty whose Hessian condition number was ≈ 7e5: a 10,000-iteration cap silently returned a point 1.7e-3 from the minimiser and a step-size stopping rule certified nothing. It was replaced with a finite Goldfarb-Idnani dual active-set QP that meets the target-return equality exactly and returns a KKT certificate; weights-only wrappers now raise rather than return an uncertified point. <code>golden.json</code> was regenerated (23 cases, validated against SLSQP and <code>covCor.m</code>) and all three ports re-pinned. This is a verified reference implementation of the published algorithms, not a production portfolio system.</div>
+
+  <h2>What's inside</h2>
+  <div class="grid">
+    <div class="card"><h3>Estimators</h3>
+      <p><code>sample_mean</code> / <code>sample_cov</code> (mean divisor T, covariance ddof = 1, correctly rounded sums), <code>shrink_covariance</code> with the Ledoit-Wolf (2004) constant-correlation target and intensity exactly per Appendix B / <code>covCor.m</code>, applied in the ddof = 1 convention, and <code>annualize_mean</code> / <code>annualize_cov</code> multiplying by a validated <code>periods</code> (252 by default).</p></div>
+    <div class="card"><h3>Pinned linear algebra</h3>
+      <p><code>cholesky</code>, <code>chol_solve</code>, <code>spd_solve</code>, <code>spd_inverse</code>: Cholesky-Banachiewicz with a relative pivot gate of 1e-13; every inverse is a pair of triangular solves. Singular covariance (a duplicated asset) is caught by the pivot, and the ports carry no BLAS/LAPACK dependency — the same arithmetic runs in all four languages.</p></div>
+    <div class="card"><h3>Markowitz: closed forms and QP</h3>
+      <p>Two-fund A/B/C/D scalars, <code>min_variance_weights</code>, <code>tangency_weights</code> with a conditioning guard (<code>TangencyUndefinedError</code>), <code>gross_leverage</code> and a 25-point <code>efficient_frontier</code>. Box-constrained problems use an exact sort-based simplex projection (Duchi 2008 / Kiwiel 2008) for feasibility and a Goldfarb-Idnani dual active-set QP with KKT certificate for <code>min_variance_longonly</code> and <code>constrained_frontier</code>; unattainable targets are rejected with the attainable range in the message.</p></div>
+    <div class="card"><h3>Black-Litterman</h3>
+      <p><code>implied_equilibrium_returns</code> (reverse optimisation, <code>pi = delta Sigma w_mkt</code>), <code>views_to_matrices</code> for validated absolute and relative views, He-Litterman <code>default_omega = diag(P tau Sigma P')</code> scaled by per-view confidence, and a posterior computed through one k×k Cholesky solve. Works in excess-return space, so its tangency is pinned at rf = 0; Idzorek confidence calibration is explicitly not implemented.</p></div>
+    <div class="card"><h3>Risk parity &amp; budgeting</h3>
+      <p><code>risk_contributions</code>, <code>erc_weights</code>, <code>risk_budget_solve</code> / <code>risk_budget_weights</code> and <code>inverse_vol_weights</code>. The solver is cyclical coordinate descent on Spinu's (2013) log-barrier formulation with the positive-root update, tol 1e-10 and a 10,000-sweep cap reported via a flag; the result is scale-invariant and permutation-equivariant, and the demo's ERC risk-contribution spread is 1.30e-12.</p></div>
+    <div class="card"><h3>Backtest-lite</h3>
+      <p><code>rebalance_indices</code>, <code>run_backtest</code> and the metrics <code>annualized_return</code>, <code>annualized_vol</code>, <code>sharpe_ratio</code>, <code>max_drawdown</code>: an expanding window of 500 rows re-estimated every 63 rows with L1 turnover between target vectors. Index-based (rows are trading days), no transaction-cost model — turnover is reported, never charged — and no missing-data handling; <code>T ≥ window + 2</code>, <code>r &gt; −1</code> and finite <code>rf</code> are validated.</p></div>
+    <div class="card"><h3>Golden suite &amp; testing</h3>
+      <p><code>data/golden/golden.json</code> holds 23 cases with a flat schema (vectors as <code>w_0..w_7</code>, matrices as <code>cov_i_j</code>), produced by the Python reference on the CSV as parsed (doubles round-trip via <code>%.17g</code>). Every golden quantity is a closed form or the exact solution of a finite algorithm, so agreement is a rounding question, not an iteration-path question; the Rust suite adds 33 property tests, and the QP is checked against SLSQP, brute-force enumeration and ~1500 random problems.</p></div>
+    <div class="card"><h3>Units, validation, scope</h3>
+      <p>Daily simple returns as decimals, weights summing to 1 (negative = short), annual-decimal <code>rf</code>. Validated everywhere: NaN/inf, returns ≤ −1, shape mismatches, non-SPD covariance, infeasible bounds, malformed views, <code>tau</code> outside (0, 1], <code>delta ≤ 0</code>. Respect n ≤ ~20 assets (dense O(n³)) and check <code>gross_leverage</code> on unconstrained weights. Out of scope: calendars, transaction costs, leverage/turnover constraints inside the optimiser, condition-number diagnostics beyond the pivot gate, multi-period objectives.</p></div>
+    <div class="card"><h3>References</h3>
+      <p>Markowitz (1952); Merton (1972); Ledoit &amp; Wolf (2004) and <code>covCor.m</code>; Black &amp; Litterman (1992); He &amp; Litterman (1999); Idzorek (2005, cited to say what is not implemented); Maillard, Roncalli &amp; Teiletche (2010); Spinu (2013); Griveau-Billion, Richard &amp; Roncalli (2013); Goldfarb &amp; Idnani (1983); Duchi et al. (2008); Kiwiel (2008); Neumaier (1974) for compensated summation; plus Jagannathan &amp; Ma, Michaud, Chopra &amp; Ziemba, Lo, Frazzini &amp; Pedersen and DeMiguel et al. in LEARN.md.</p></div>
+    <div class="card"><h3>Guide &amp; cookbook</h3>
+      <p>LEARN.md covers mean-variance foundations, why raw Markowitz maximises estimation error, Ledoit-Wolf with a worked intensity (rbar = 0.4172, delta = 0.0072), why long-only regularises, Black-Litterman, risk parity, a practical desk workflow, an honest-limitations scorecard and interview Q&amp;A. COOKBOOK.md holds task-oriented recipes in all four languages, compile-checked.</p></div>
+  </div>
+
+  <h2>Part of a wider portfolio</h2>
+  <div class="grid">
+    <div class="card"><h3><a href="https://ashjha0.github.io/quant-portfolio/" style="color:inherit">quant-portfolio</a></h3>
+      <p>The end-to-end quantitative finance portfolio this project sits alongside: 10 project
+         areas built twice each (equity + FX) in Python with C++ and Rust performance twins —
+         31 sub-projects with golden-vector cross-language validation, a 481-question learning
+         guide and a verified cookbook. <a href="https://github.com/AshJha0/quant-portfolio">GitHub&nbsp;→</a></p></div>
+    <div class="card"><h3><a href="https://ashjha0.github.io/intraday-alpha-platform/" style="color:inherit">intraday-alpha-platform</a></h3>
+      <p>A polyglot (Python/C++/Rust/Java) research-to-production intraday trading platform:
+         market data → order books → 205-feature factory → 24 alphas → validation → portfolio →
+         fail-closed risk → execution → TCA, with an adaptive drift/lifecycle layer and 1,160
+         golden-parity tests. <a href="https://github.com/AshJha0/intraday-alpha-platform">GitHub&nbsp;→</a></p></div>
+    <div class="card"><h3><a href="https://github.com/AshJha0/Quant-Finance-Library" style="color:inherit">quantfinlib</a></h3>
+      <p>A zero-dependency quantitative finance platform for the JVM — research, validation,
+         execution and connectivity, from walk-forward backtesting to a measured
+         sub-microsecond tick-to-order path, with 1,090+ tests and CI on every push.
+         <a href="https://github.com/AshJha0/Quant-Finance-Library">GitHub&nbsp;→</a></p></div>
+  </div>
+
+  <h2>Quick start</h2>
+<pre>git clone https://github.com/AshJha0/portfolio-construction &amp;&amp; cd portfolio-construction
+
+# Python (3.11 + numpy; pytest and scipy for the tests only)
+cd python
+PYTHONPATH=src python3 demo.py           # end-to-end demo (~0.3 s)
+PYTHONPATH=src python3 -m pytest -q      # 114 tests incl. the golden suite (~1 s)
+cd ..
+
+# C++ (C++17, CMake &gt;= 3.16, GoogleTest)
+cd cpp
+bash build.sh                            # cmake -S . -B build -DCMAKE_BUILD_TYPE=Release &amp;&amp; cmake --build build -j2
+./build/portopt_demo                     # demo (data resolved at ../data)
+ctest --test-dir build --output-on-failure   # 90 tests
+cd ..
+
+# Rust (edition 2021)
+cd rust
+cargo build --release                    # zero warnings
+cargo run --release --bin demo
+cargo test --release                     # 58 tests (23 unit + 2 golden + 33 property)
+cd ..
+
+# Java (21, JUnit 4 + Hamcrest — no Maven/Gradle)
+cd java
+bash build.sh    # javac -Xlint:all -Werror everything into out/
+bash demo.sh     # runs the demo main
+bash test.sh     # JUnitCore on all *Test classes: 108 tests
+
+# regenerate the dataset and golden values
+python3 data/generate_data.py</pre>
+
+  <footer>portfolio-construction — four golden-pinned ports of Markowitz, Black-Litterman and risk parity with a certified QP and an honest backtest. See the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/README.md">README</a> and the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/LICENSE">MIT license</a>.</footer>
+</div>
+</body>
+</html>

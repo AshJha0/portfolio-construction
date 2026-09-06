@@ -16,9 +16,13 @@ pub enum PortOptError {
     /// indefinite covariance, e.g. a duplicated asset).
     NotPositiveDefinite(String),
     /// A quantity is mathematically undefined for the given inputs
-    /// (tangency with `A - rf*C <= 0`, degenerate frontier, target below
-    /// the minimum-variance return, zero-vol Sharpe, ...).
+    /// (degenerate frontier, target below the minimum-variance return or
+    /// not attainable, zero-vol Sharpe, non-certified QP, ...).
     Undefined(String),
+    /// The tangency portfolio is undefined (`A - rf*C <= 0`) or
+    /// ill-conditioned (`A - rf*C` within a relative 1e-6 of cancelling).
+    /// Distinct so the pinned backtest fallback can match exactly this case.
+    TangencyUndefined(String),
     /// Infeasible constraint set for the box-simplex projection.
     Infeasible(String),
     /// Failure reading or parsing a bundled data file.
@@ -31,6 +35,7 @@ impl fmt::Display for PortOptError {
             PortOptError::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             PortOptError::NotPositiveDefinite(msg) => write!(f, "{msg}"),
             PortOptError::Undefined(msg) => write!(f, "{msg}"),
+            PortOptError::TangencyUndefined(msg) => write!(f, "{msg}"),
             PortOptError::Infeasible(msg) => write!(f, "infeasible bounds: {msg}"),
             PortOptError::Data(msg) => write!(f, "data error: {msg}"),
         }

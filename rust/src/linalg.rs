@@ -13,15 +13,12 @@
 //! * SPD inverse: column-by-column Cholesky solves against identity
 //!   columns (no post-symmetrization).
 //!
-//! Beyond the factorization kernels, this module provides summation
-//! primitives that reproduce the reference implementation's floating
-//! point *bit for bit* where golden values demand it: [`np_sum`]
-//! (numpy's pairwise summation), [`fma_dot`]/[`blas_dot`]/[`np_matvec`]/
-//! [`np_vecmat`] (the OpenBLAS kernels numpy dispatches to), and
-//! [`kahan_sum`] (Neumaier compensation for the shrinkage dispersion
-//! sums, where tolerances are loose enough that ulp-exactness is not
-//! required). The Cholesky recurrences themselves use plain
-//! left-to-right sums to mirror the Python loops operation for
+//! Beyond the factorization kernels, this module provides [`kahan_sum`]
+//! (Neumaier-compensated summation) for every T-length reduction: the
+//! Python reference sums with correctly rounded `math.fsum`, and the
+//! compensated sum agrees with it to a couple of ulps, so no golden value
+//! depends on a BLAS or on the summation order. The Cholesky recurrences
+//! use plain left-to-right sums to mirror the Python loops operation for
 //! operation.
 
 use crate::error::{PortOptError, Result};
@@ -112,7 +109,9 @@ impl Matrix {
         self.cols
     }
 
-    /// Entry at `(i, j)` (row, column); panics on out-of-range indices.
+    /// Entry at `(i, j)` (row, column). Out-of-range indices are a
+    /// programming error and panic like slice indexing (debug assertion
+    /// plus the underlying bounds check).
     #[inline]
     pub fn get(&self, i: usize, j: usize) -> f64 {
         debug_assert!(i < self.rows && j < self.cols);
@@ -142,6 +141,11 @@ impl Matrix {
     }
 
     /// Matrix-vector product `A v` with plain left-to-right row sums.
+    ///
+    /// # Panics
+    /// If `v.len() != ncols()` — a shape mismatch is a programming error,
+    /// not invalid data; every public API validates shapes before calling
+    /// this helper and returns `Err` instead.
     pub fn matvec(&self, v: &[f64]) -> Vec<f64> {
         assert_eq!(v.len(), self.cols, "matvec dimension mismatch");
         (0..self.rows).map(|i| dot(self.row(i), v)).collect()
@@ -169,158 +173,10 @@ pub fn dot(a: &[f64], b: &[f64]) -> f64 {
     s
 }
 
-/// Sequential fused-multiply-add dot product: `s = fma(a[k], b[k], s)`.
-///
-/// Reproduces bit-for-bit the OpenBLAS `ddot` result that numpy produces
-/// for the short (n <= 8) vector-vector products inside the reference
-/// PGD loop; keeping those bits identical keeps the PGD trajectory — and
-/// therefore the pinned turnover golden value — identical to Python's.
-pub fn fma_dot(a: &[f64], b: &[f64]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut s = 0.0_f64;
-    for k in 0..a.len() {
-        s = a[k].mul_add(b[k], s);
-    }
-    s
-}
-
-/// OpenBLAS `dgemm` k-blocking constant (GEMM_Q) observed for the
-/// reference BLAS: long reduction dimensions are processed in blocks.
-const GEMM_Q: usize = 384;
-
-/// Long dot product mirroring the OpenBLAS dgemm accumulation order used
-/// by numpy's `xc.T @ xc` (the sample covariance): the k-dimension is cut
-/// greedily into blocks (`>= 2*384` takes 384; a remainder in
-/// `(384, 768)` is halved with the first half rounded up), each block is
-/// accumulated with sequential FMA, and block partials are added left to
-/// right. Verified bit-exact against the reference for every window
-/// length used by the pinned backtest.
-pub fn blas_dot(a: &[f64], b: &[f64]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    let n = a.len();
-    let mut total: Option<f64> = None;
-    let mut k0 = 0usize;
-    while k0 < n {
-        let rem = n - k0;
-        let blk = if rem >= 2 * GEMM_Q {
-            GEMM_Q
-        } else if rem > GEMM_Q {
-            rem.div_ceil(2)
-        } else {
-            rem
-        };
-        let mut part = 0.0_f64;
-        for k in k0..k0 + blk {
-            part = a[k].mul_add(b[k], part);
-        }
-        total = Some(match total {
-            None => part,
-            Some(t) => t + part,
-        });
-        k0 += blk;
-    }
-    total.unwrap_or(0.0)
-}
-
-/// numpy-compatible pairwise summation (`np.sum` over a contiguous
-/// float64 vector): naive below 8 elements, an 8-accumulator unrolled
-/// loop with a fixed reduction tree up to 128, and a recursive halving
-/// split (rounded down to a multiple of 8) above.
-pub fn np_sum(v: &[f64]) -> f64 {
-    let n = v.len();
-    if n == 0 {
-        return 0.0;
-    }
-    if n < 8 {
-        let mut s = v[0];
-        for &x in &v[1..] {
-            s += x;
-        }
-        return s;
-    }
-    if n <= 128 {
-        let mut r = [0.0_f64; 8];
-        r.copy_from_slice(&v[..8]);
-        let mut i = 8;
-        while i + 8 <= n {
-            for j in 0..8 {
-                r[j] += v[i + j];
-            }
-            i += 8;
-        }
-        let mut res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-        while i < n {
-            res += v[i];
-            i += 1;
-        }
-        return res;
-    }
-    let mut n2 = n / 2;
-    n2 -= n2 % 8;
-    np_sum(&v[..n2]) + np_sum(&v[n2..])
-}
-
-/// Matrix-vector product mirroring the OpenBLAS `dgemv` row kernel that
-/// numpy uses for `Sigma @ w` (the PGD gradient): per row, four FMA
-/// accumulators striding the columns, reduced as `(r0+r2) + (r1+r3)`;
-/// a non-multiple-of-4 tail keeps accumulating into the striped slots.
-/// Bit-exact vs the reference for the n = 8 systems of this project.
-pub fn np_matvec(m: &Matrix, v: &[f64]) -> Vec<f64> {
-    assert_eq!(v.len(), m.ncols(), "np_matvec dimension mismatch");
-    let n = m.ncols();
-    (0..m.nrows())
-        .map(|i| {
-            let row = m.row(i);
-            let mut r = [0.0_f64; 4];
-            for k in 0..n {
-                r[k % 4] = row[k].mul_add(v[k], r[k % 4]);
-            }
-            if n >= 4 {
-                (r[0] + r[2]) + (r[1] + r[3])
-            } else {
-                r[0] + r[1] + r[2] + r[3]
-            }
-        })
-        .collect()
-}
-
-/// Vector-matrix product `v' M` mirroring numpy's `w @ Sigma` (the
-/// OpenBLAS `dgemv_n` SkylakeX kernel): per output column, blocks of
-/// four terms are combined as `fma(m2, v2 + fma(m3, v3, ...))` seeded by
-/// `fma(m0, v0, m1*v1)` — the compiler's contraction of
-/// `m0*v0 + m1*v1 + m2*v2 + m3*v3` — and block sums are added into the
-/// output one block at a time; a 2/1-column tail follows the driver's
-/// `4x2`/`4x1` kernels. Bit-exact vs the reference for n = 8.
-pub fn np_vecmat(v: &[f64], m: &Matrix) -> Vec<f64> {
-    assert_eq!(v.len(), m.nrows(), "np_vecmat dimension mismatch");
-    let n = m.nrows();
-    (0..m.ncols())
-        .map(|j| {
-            let mut y = 0.0_f64;
-            let mut i = 0usize;
-            while i + 4 <= n {
-                let mut s = m.get(i, j).mul_add(v[i], m.get(i + 1, j) * v[i + 1]);
-                s = m.get(i + 2, j).mul_add(v[i + 2], s);
-                s = m.get(i + 3, j).mul_add(v[i + 3], s);
-                y += s;
-                i += 4;
-            }
-            if n - i >= 2 {
-                y += m.get(i, j).mul_add(v[i], m.get(i + 1, j) * v[i + 1]);
-                i += 2;
-            }
-            if i < n {
-                y += m.get(i, j) * v[i];
-            }
-            y
-        })
-        .collect()
-}
-
 /// Neumaier-compensated sum for long (T-length) accumulations.
 ///
-/// Matches numpy's pairwise summation to within a couple of ulps, keeping
-/// the T = 1250 moment sums inside the 1e-12 golden tolerances.
+/// Matches the reference's correctly rounded `math.fsum` to within a
+/// couple of ulps (an empty iterator sums to 0).
 pub fn kahan_sum<I: IntoIterator<Item = f64>>(xs: I) -> f64 {
     let mut sum = 0.0;
     let mut c = 0.0;

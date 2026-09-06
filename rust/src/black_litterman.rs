@@ -23,10 +23,12 @@
 //! the posterior tau-invariant — the tau limit must be taken at fixed
 //! Omega.
 //!
-//! Omega default (Idzorek-style): `Omega = diag(P (tau Sigma) P')`
-//! scaled per view by a confidence `c_k > 0`:
-//! `Omega_kk = [P tau S P']_kk / c_k` (`c_k -> inf`: dogmatic view;
-//! `c_k -> 0`: view ignored).
+//! Omega default (He & Litterman 1999, scaled by a confidence divisor):
+//! `Omega = diag(P (tau Sigma) P')` with each entry divided by a per-view
+//! confidence `c_k > 0`: `Omega_kk = [P tau S P']_kk / c_k` (`c_k -> inf`:
+//! dogmatic view; `c_k -> 0`: view ignored). This is *not* Idzorek's
+//! (2005) calibration, which solves for Omega such that the posterior tilt
+//! is a stated fraction of the full-confidence tilt.
 
 use serde::Deserialize;
 
@@ -114,12 +116,24 @@ pub fn implied_equilibrium_returns(sigma: &Matrix, w_mkt: &[f64], delta: f64) ->
 /// Build `(P, Q, confidences)` from a list of views.
 ///
 /// # Errors
-/// [`PortOptError::InvalidInput`] on an empty view list, an unknown asset
-/// name, or a non-positive/non-finite confidence.
+/// [`PortOptError::InvalidInput`] on an empty view list or asset list,
+/// duplicate asset names, an unknown asset name, a relative view whose
+/// legs coincide, a non-finite `q`, or a non-positive/non-finite
+/// confidence.
 pub fn views_to_matrices(
     views: &[View],
     asset_names: &[String],
 ) -> Result<(Matrix, Vec<f64>, Vec<f64>)> {
+    if asset_names.is_empty() {
+        return Err(PortOptError::InvalidInput("asset_names must be non-empty".into()));
+    }
+    for i in 0..asset_names.len() {
+        if asset_names[i + 1..].contains(&asset_names[i]) {
+            return Err(PortOptError::InvalidInput(
+                "asset_names contains duplicates".into(),
+            ));
+        }
+    }
     if views.is_empty() {
         return Err(PortOptError::InvalidInput("views list must be non-empty".into()));
     }
@@ -139,11 +153,21 @@ pub fn views_to_matrices(
                 (*q, *confidence)
             }
             View::Relative { long, short, q, confidence } => {
-                p.set(i, index_of(long)?, 1.0);
-                p.set(i, index_of(short)?, -1.0);
+                let i_long = index_of(long)?;
+                let i_short = index_of(short)?;
+                if i_long == i_short {
+                    return Err(PortOptError::InvalidInput(format!(
+                        "view {i}: relative view: long and short legs must differ"
+                    )));
+                }
+                p.set(i, i_long, 1.0);
+                p.set(i, i_short, -1.0);
                 (*q, *confidence)
             }
         };
+        if !qi.is_finite() {
+            return Err(PortOptError::InvalidInput(format!("view {i}: q must be finite")));
+        }
         if !ci.is_finite() || ci <= 0.0 {
             return Err(PortOptError::InvalidInput(format!(
                 "view {i}: confidence must be positive and finite"
@@ -224,7 +248,7 @@ fn p_tau_sigma(p: &Matrix, ts: &Matrix) -> Matrix {
     b
 }
 
-/// Idzorek-style default view covariance:
+/// He-Litterman default view covariance scaled by a confidence divisor:
 /// `Omega = diag(P (tau Sigma) P')` with each diagonal entry divided by
 /// the corresponding per-view confidence `c_k > 0` (default 1).
 pub fn default_omega(
@@ -264,8 +288,10 @@ pub struct BlResult {
 /// Black-Litterman posterior via the pinned master formula.
 ///
 /// `omega = None` uses [`default_omega`] (with optional per-view
-/// confidences). The k x k system `A_k = P tau Sigma P' + Omega` is
-/// factored once by Cholesky and solved column-wise.
+/// confidences); passing both `omega` and `confidences` is an error (the
+/// confidences only parametrize the default Omega). The k x k system
+/// `A_k = P tau Sigma P' + Omega` is factored once by Cholesky and solved
+/// column-wise.
 ///
 /// # Errors
 /// Validation errors for shapes, tau, views, or confidences;
@@ -297,6 +323,12 @@ pub fn bl_posterior(
     let om = match omega {
         None => default_omega(sigma, p, tau, confidences)?,
         Some(o) => {
+            if confidences.is_some() {
+                return Err(PortOptError::InvalidInput(
+                    "confidences are only used with the default Omega; pass one or the other"
+                        .into(),
+                ));
+            }
             check_square_symmetric(o)?;
             if o.nrows() != k {
                 return Err(PortOptError::InvalidInput(format!(
@@ -323,7 +355,7 @@ pub fn bl_posterior(
     let x = chol_solve(&low, &resid)?;
     let mu_post: Vec<f64> = (0..n).map(|j| pi[j] + dot(&b.col(j), &x)).collect();
 
-    // M = tau S - B' A_k^-1 B, computed via n solves against B's columns.
+    // M = tau S - B' A_k^-1 B: A_k^-1 B via n solves, one per column of B.
     let mut ainv_b = Matrix::zeros(k, n);
     for j in 0..n {
         let col = chol_solve(&low, &b.col(j))?;
@@ -360,6 +392,9 @@ pub fn bl_weights(
     omega: Option<&Matrix>,
     confidences: Option<&[f64]>,
 ) -> Result<(Vec<f64>, BlResult)> {
+    if !rf.is_finite() {
+        return Err(PortOptError::InvalidInput("rf must be finite".into()));
+    }
     let res = bl_posterior(sigma, pi, p, q, tau, omega, confidences)?;
     let w = tangency_weights(&res.mu_post, &res.sigma_post, rf)?;
     Ok((w, res))
@@ -401,5 +436,11 @@ mod tests {
         assert!(views_to_matrices(&[], &names).is_err());
         let bad = vec![View::Absolute { asset: "Z".into(), q: 0.1, confidence: 1.0 }];
         assert!(views_to_matrices(&bad, &names).is_err());
+        let nan_q = vec![View::Absolute { asset: "A".into(), q: f64::NAN, confidence: 1.0 }];
+        assert!(views_to_matrices(&nan_q, &names).is_err());
+        let same = vec![View::Relative { long: "A".into(), short: "A".into(), q: 0.02, confidence: 1.0 }];
+        assert!(views_to_matrices(&same, &names).is_err());
+        let dup: Vec<String> = vec!["A".into(), "B".into(), "A".into()];
+        assert!(views_to_matrices(&views, &dup).is_err());
     }
 }

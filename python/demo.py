@@ -60,16 +60,22 @@ def main() -> int:
         )
 
     # --------------------------------------------------------------- frontier
-    rule("Efficient frontier sweep (25 points, showing every 4th)")
+    rule("Efficient frontier sweeps (25 points each, showing every 4th)")
     targets, _, var_u = po.efficient_frontier(mu, sig, cfg["frontier_points"])
-    _, _, var_c = po.constrained_frontier(mu, sig, cfg["frontier_points"])
-    print(f"{'target':>8}{'vol uncon':>11}{'vol long-only':>15}")
+    targets_c, w_c, var_c = po.constrained_frontier(mu, sig, cfg["frontier_points"])
+    print("unconstrained grid: A/C .. max(mu);  long-only grid: constrained GMV .. max(mu)")
+    print(f"{'target':>8}{'vol uncon':>11}{'target':>10}{'vol long-only':>15}")
     for k in range(0, len(targets), 4):
-        print(f"{targets[k]:>8.4f}{np.sqrt(var_u[k]):>11.4f}{np.sqrt(var_c[k]):>15.4f}")
+        print(
+            f"{targets[k]:>8.4f}{np.sqrt(var_u[k]):>11.4f}"
+            f"{targets_c[k]:>10.4f}{np.sqrt(var_c[k]):>15.4f}"
+        )
+    print(f"long-only targets met exactly: max |mu'w - target| = {np.max(np.abs(w_c @ mu - targets_c)):.1e}")
     w_tan = po.tangency_weights(mu, sig, rf)
     print(
         f"tangency (rf={rf:.2%}): sharpe = "
-        f"{(mu @ w_tan - rf) / np.sqrt(w_tan @ sig @ w_tan):.4f}"
+        f"{(mu @ w_tan - rf) / np.sqrt(w_tan @ sig @ w_tan):.4f}, "
+        f"gross leverage = {po.gross_leverage(w_tan):.2f}"
     )
 
     # -------------------------------------------------------- black-litterman
@@ -91,6 +97,7 @@ def main() -> int:
     print(wrow("mu posterior", res.mu_post))
     print(wrow("w market", w_mkt))
     print(wrow("w posterior", w_bl))
+    print(f"posterior gross leverage = {po.gross_leverage(w_bl):.4f}")
 
     # ------------------------------------------------------------- risk parity
     rule("Risk contributions: ERC vs inverse-vol")
@@ -115,12 +122,13 @@ def main() -> int:
 
     def tangency_fn(h: np.ndarray) -> np.ndarray:
         """Pinned backtest method: tangency, falling back to unconstrained
-        min-variance for a rebalance where tangency is undefined
-        (A - rf*C <= 0) — reported, not crashed (API_SPEC 6.3)."""
+        min-variance for a rebalance where tangency is undefined or
+        ill-conditioned — reported, not crashed (API_SPEC 6.3).  Any other
+        error (e.g. a singular covariance) propagates."""
         s = po.annualize_cov(po.sample_cov(h))
         try:
             return po.tangency_weights(po.annualize_mean(po.sample_mean(h)), s, rf)
-        except ValueError:
+        except po.TangencyUndefinedError:
             fallbacks["n"] += 1
             return po.min_variance_weights(s)
 
@@ -155,8 +163,8 @@ def main() -> int:
 
     if fallbacks["n"]:
         print(
-            f"note: tangency undefined at {fallbacks['n']} rebalance date(s) "
-            "(rf above min-var return); fell back to min-variance there."
+            f"note: tangency undefined/ill-conditioned at {fallbacks['n']} rebalance "
+            "date(s) (rf at or above the min-var return); fell back to min-variance there."
         )
 
     print("\ndemo complete.")

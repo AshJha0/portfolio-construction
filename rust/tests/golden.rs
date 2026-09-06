@@ -83,7 +83,7 @@ fn input_f64(case: &GoldenCase, key: &str) -> f64 {
 #[test]
 fn golden_all_cases() {
     let g = golden();
-    assert_eq!(g.len(), 21, "expected 21 golden cases");
+    assert_eq!(g.len(), 23, "expected 23 golden cases");
     let c = ctx();
     let mut covered = 0usize;
 
@@ -142,6 +142,7 @@ fn golden_all_cases() {
         check_vec(case, "w", &w);
         let sharpe = (dot(&c.mu, &w) - rf) / dot(&w, &c.sig.matvec(&w)).sqrt();
         check(case, "sharpe", sharpe);
+        check(case, "gross_leverage", po::gross_leverage(&w).unwrap());
         covered += 1;
     }
 
@@ -155,11 +156,25 @@ fn golden_all_cases() {
         covered += 1;
     }
 
-    // ------------------------------------------------------- minvar_longonly_pgd
+    // -------------------------------------------------------- minvar_longonly_qp
     {
-        let case = &g["minvar_longonly_pgd"];
+        let case = &g["minvar_longonly_qp"];
+        let res = po::min_variance_longonly_solve(&c.sig, None, None, po::QP_MAX_ITER).unwrap();
+        assert!(res.converged, "min-variance QP not certified");
+        check_vec(case, "w", &res.weights);
         let w = po::min_variance_longonly(&c.sig, None, None).unwrap();
+        check(case, "variance", dot(&w, &c.sig.matvec(&w)));
+        covered += 1;
+    }
+
+    // ------------------------------------------------------------- minvar_box_qp
+    {
+        let case = &g["minvar_box_qp"];
+        let lb = vec![input_f64(case, "lb"); 8];
+        let ub = vec![input_f64(case, "ub"); 8];
+        let w = po::min_variance_longonly(&c.sig, Some(&lb), Some(&ub)).unwrap();
         check_vec(case, "w", &w);
+        check(case, "variance", dot(&w, &c.sig.matvec(&w)));
         covered += 1;
     }
 
@@ -167,10 +182,25 @@ fn golden_all_cases() {
     {
         let case = &g["frontier_constrained_t080"];
         let target = input_f64(case, "target");
-        let penalty = input_f64(case, "penalty");
-        let w =
-            po::constrained_frontier_weights(&c.mu, &c.sig, target, penalty, None, None).unwrap();
+        let res = po::constrained_frontier_solve(&c.mu, &c.sig, target, None, None, po::QP_MAX_ITER)
+            .unwrap();
+        assert!(res.converged, "frontier QP not certified");
+        check_vec(case, "w", &res.weights);
+        check(case, "variance", dot(&res.weights, &c.sig.matvec(&res.weights)));
+        assert!((dot(&c.mu, &res.weights) - target).abs() < 1e-12);
+        covered += 1;
+    }
+
+    // ---------------------------------------------- frontier_constrained_box_t060
+    {
+        let case = &g["frontier_constrained_box_t060"];
+        let target = input_f64(case, "target");
+        let lb = vec![input_f64(case, "lb"); 8];
+        let ub = vec![input_f64(case, "ub"); 8];
+        let w = po::constrained_frontier_weights(&c.mu, &c.sig, target, Some(&lb), Some(&ub)).unwrap();
         check_vec(case, "w", &w);
+        check(case, "variance", dot(&w, &c.sig.matvec(&w)));
+        assert!((dot(&c.mu, &w) - target).abs() < 1e-12);
         covered += 1;
     }
 
@@ -348,5 +378,34 @@ fn golden_all_cases() {
         covered += 1;
     }
 
-    assert_eq!(covered, 21, "every golden case must be asserted");
+    assert_eq!(covered, 23, "every golden case must be asserted");
+}
+
+#[test]
+fn qp_goldens_are_input_stable() {
+    // Scaling the returns by (1 + 2^-52) moves the QP goldens by far less
+    // than their tolerance: the solver is an exact function of the active set.
+    let g = golden();
+    let c = ctx();
+    let rows: Vec<Vec<f64>> = (0..c.returns.nrows())
+        .map(|r| c.returns.row(r).iter().map(|v| v * (1.0 + 2f64.powi(-52))).collect())
+        .collect();
+    let x2 = Matrix::from_rows(&rows).unwrap();
+    let w = po::min_variance_longonly(&po::annualize_cov(&po::sample_cov(&x2).unwrap(), 252.0).unwrap(), None, None).unwrap();
+    let case = &g["minvar_longonly_qp"];
+    for (i, &v) in w.iter().enumerate() {
+        assert!((v - case.expect[&format!("w_{i}")]).abs() < 1e-13);
+    }
+    let r = po::run_backtest(
+        &x2,
+        |h: &Matrix| {
+            let s = po::annualize_cov(&po::sample_cov(h)?, 252.0)?;
+            po::min_variance_longonly(&s, None, None)
+        },
+        0.0,
+        500,
+        63,
+    )
+    .unwrap();
+    assert!((r.avg_turnover - g["turnover_minvar_longonly"].expect["avg_turnover"]).abs() < 1e-12);
 }

@@ -16,9 +16,12 @@ needs only one k x k Cholesky solve, which is the pinned implementation.
 Limits (tested): tau -> 0 gives mu_post -> pi and M -> 0; Omega -> inf
 (zero confidence) gives mu_post -> pi and M -> tau Sigma.
 
-Omega default (Idzorek-style): ``Omega = diag(P (tau Sigma) P')`` scaled
-per view by a confidence c_k > 0: ``Omega_kk = [P tau S P']_kk / c_k``
-(c_k -> inf: dogmatic view; c_k -> 0: view ignored).
+Omega default (He & Litterman 1999, scaled by a confidence divisor):
+``Omega = diag(P (tau Sigma) P')`` with each entry divided by a per-view
+confidence c_k > 0: ``Omega_kk = [P tau S P']_kk / c_k`` (c_k -> inf:
+dogmatic view; c_k -> 0: view ignored).  This is *not* Idzorek's (2005)
+calibration, which solves for Omega such that the posterior tilt is a
+stated fraction of the full-confidence tilt.
 """
 from __future__ import annotations
 
@@ -81,24 +84,54 @@ def views_to_matrices(
       "confidence": c}`` — P row is +1 on ``long`` and -1 on ``short``.
 
     ``confidence`` defaults to 1.0 and must be > 0.
+
+    Raises ValueError (never KeyError) on: an empty view list, duplicate
+    asset names, an unknown view type, a missing ``asset``/``long``/
+    ``short``/``q`` key, an unknown asset name, a relative view whose legs
+    coincide (its P row would be identically zero — or, with the naive
+    +1/-1 assignment, a silent absolute short view), or a non-finite ``q``.
     """
     names = list(asset_names)
+    if len(names) == 0:
+        raise ValueError("asset_names must be non-empty")
+    if len(set(names)) != len(names):
+        raise ValueError("asset_names contains duplicates")
     if len(views) == 0:
         raise ValueError("views list must be non-empty")
     k, n = len(views), len(names)
     p = np.zeros((k, n), dtype=float)
     q = np.zeros(k, dtype=float)
     conf = np.ones(k, dtype=float)
+
+    def index_of(view: Mapping, key: str, i: int) -> int:
+        if key not in view:
+            raise ValueError(f"view {i}: missing required key {key!r}")
+        name = view[key]
+        if name not in names:
+            raise ValueError(f"view {i}: unknown asset name {name!r}")
+        return names.index(name)
+
     for i, view in enumerate(views):
         vtype = view.get("type")
         if vtype == "absolute":
-            p[i, names.index(view["asset"])] = 1.0
+            p[i, index_of(view, "asset", i)] = 1.0
         elif vtype == "relative":
-            p[i, names.index(view["long"])] = 1.0
-            p[i, names.index(view["short"])] = -1.0
+            i_long = index_of(view, "long", i)
+            i_short = index_of(view, "short", i)
+            if i_long == i_short:
+                raise ValueError(
+                    f"view {i}: relative view: long and short legs must differ"
+                )
+            p[i, i_long] = 1.0
+            p[i, i_short] = -1.0
         else:
-            raise ValueError(f"unknown view type: {vtype!r}")
-        q[i] = float(view["q"])
+            raise ValueError(f"view {i}: unknown view type: {vtype!r}")
+        if "q" not in view:
+            raise ValueError(f"view {i}: missing required key 'q'")
+        qv = float(view["q"])
+        if not math.isfinite(qv):
+            raise ValueError(f"view {i}: q must be finite")
+        q[i] = qv
         c = float(view.get("confidence", 1.0))
         if not (math.isfinite(c) and c > 0):
             raise ValueError(f"view {i}: confidence must be positive and finite")
@@ -133,7 +166,7 @@ def default_omega(
     tau: float,
     confidences: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
-    """Idzorek-style default view covariance.
+    """He-Litterman default view covariance scaled by a confidence divisor.
 
     ``Omega = diag(P (tau Sigma) P')`` with each diagonal entry divided by
     the corresponding per-view confidence ``c_k > 0`` (default 1).
@@ -189,8 +222,10 @@ def bl_posterior(
     """Black-Litterman posterior via the pinned master formula.
 
     ``omega=None`` uses :func:`default_omega` (with optional per-view
-    confidences).  The k x k system is solved column-wise with one
-    Cholesky factorization of ``A_k = P tau Sigma P' + Omega``.
+    confidences); passing both ``omega`` and ``confidences`` is an error
+    (the confidences only parametrize the default Omega).  The k x k
+    system is solved column-wise with one Cholesky factorization of
+    ``A_k = P tau Sigma P' + Omega``.
     """
     s = check_square_symmetric(sigma)
     n = s.shape[0]
@@ -206,6 +241,10 @@ def bl_posterior(
     if omega is None:
         om = default_omega(s, pm, t, confidences)
     else:
+        if confidences is not None:
+            raise ValueError(
+                "confidences are only used with the default Omega; pass one or the other"
+            )
         om = check_square_symmetric(omega)
         if om.shape[0] != k:
             raise ValueError(f"Omega must be {k} x {k}, got {om.shape}")
@@ -219,7 +258,7 @@ def bl_posterior(
     x = chol_solve(low, resid)
     mu_post = pi_v + b.T @ x
 
-    # M = tau S - B' A_k^{-1} B, computed via k solves against B's rows.
+    # M = tau S - B' A_k^{-1} B: A_k^{-1} B via n solves, one per column of B.
     ainv_b = np.zeros_like(b)
     for j in range(n):
         ainv_b[:, j] = chol_solve(low, b[:, j])
@@ -246,6 +285,8 @@ def bl_weights(
     tangency on ``(pi, Sigma)`` recovers exactly ``w_mkt``.
     Returns (weights, BLResult).
     """
+    if not math.isfinite(float(rf)):
+        raise ValueError("rf must be finite")
     res = bl_posterior(sigma, pi, p, q, tau, omega=omega, confidences=confidences)
     w = tangency_weights(res.mu_post, res.sigma_post, rf)
     return w, res

@@ -24,7 +24,7 @@ public class GoldenTest {
 
     @Test
     public void goldenCaseCount() {
-        assertTrue("expected at least 20 golden cases", TestData.golden().size() >= 20);
+        assertEquals("expected exactly 23 golden cases", 23, TestData.golden().size());
     }
 
     @Test
@@ -90,6 +90,7 @@ public class GoldenTest {
         double sharpe = (Linalg.dot(TestData.muAnnualized(), w) - rf)
                 / Math.sqrt(Linalg.quadForm(w, TestData.sigmaAnnualized()));
         assertEquals(TestData.expectScalar(c, "sharpe"), sharpe, tol);
+        assertEquals(TestData.expectScalar(c, "gross_leverage"), Markowitz.grossLeverage(w), tol);
     }
 
     @Test
@@ -105,19 +106,80 @@ public class GoldenTest {
     }
 
     @Test
-    public void minvarLongOnlyPgd() {
-        assertVector("minvar_longonly_pgd", "w",
-                Markowitz.minVarianceLongOnly(TestData.sigmaAnnualized()));
+    public void minvarLongOnlyQp() {
+        String c = "minvar_longonly_qp";
+        Markowitz.QpResult res = Markowitz.minVarianceLongOnlySolve(
+                TestData.sigmaAnnualized(), null, null, Markowitz.QP_MAX_ITER);
+        assertTrue("QP certified", res.converged());
+        assertVector(c, "w", res.weights());
+        double[] w = Markowitz.minVarianceLongOnly(TestData.sigmaAnnualized());
+        assertEquals(TestData.expectScalar(c, "variance"),
+                Linalg.quadForm(w, TestData.sigmaAnnualized()), TestData.tol(c));
+    }
+
+    @Test
+    public void minvarBoxQp() {
+        String c = "minvar_box_qp";
+        double[] w = Markowitz.minVarianceLongOnly(TestData.sigmaAnnualized(),
+                new double[] {TestData.inputScalar(c, "lb")},
+                new double[] {TestData.inputScalar(c, "ub")});
+        assertVector(c, "w", w);
+        assertEquals(TestData.expectScalar(c, "variance"),
+                Linalg.quadForm(w, TestData.sigmaAnnualized()), TestData.tol(c));
     }
 
     @Test
     public void frontierConstrainedT080() {
         String c = "frontier_constrained_t080";
+        double target = TestData.inputScalar(c, "target");
+        Markowitz.QpResult res = Markowitz.constrainedFrontierSolve(
+                TestData.muAnnualized(), TestData.sigmaAnnualized(), target, null, null,
+                Markowitz.QP_MAX_ITER);
+        assertTrue("QP certified", res.converged());
+        assertVector(c, "w", res.weights());
+        assertEquals(TestData.expectScalar(c, "variance"),
+                Linalg.quadForm(res.weights(), TestData.sigmaAnnualized()), TestData.tol(c));
+        assertEquals(target, Linalg.dot(TestData.muAnnualized(), res.weights()), 1e-12);
+    }
+
+    @Test
+    public void frontierConstrainedBoxT060() {
+        String c = "frontier_constrained_box_t060";
+        double target = TestData.inputScalar(c, "target");
         double[] w = Markowitz.constrainedFrontierWeights(
-                TestData.muAnnualized(), TestData.sigmaAnnualized(),
-                TestData.inputScalar(c, "target"), TestData.inputScalar(c, "penalty"),
-                null, null);
+                TestData.muAnnualized(), TestData.sigmaAnnualized(), target,
+                new double[] {TestData.inputScalar(c, "lb")},
+                new double[] {TestData.inputScalar(c, "ub")});
         assertVector(c, "w", w);
+        assertEquals(TestData.expectScalar(c, "variance"),
+                Linalg.quadForm(w, TestData.sigmaAnnualized()), TestData.tol(c));
+        assertEquals(target, Linalg.dot(TestData.muAnnualized(), w), 1e-12);
+    }
+
+    @Test
+    public void qpGoldensAreInputStable() {
+        // Scaling the returns by (1 + 2^-52) moves the QP goldens by far less
+        // than their tolerance: the solver is an exact function of the active set.
+        double[][] x = TestData.returns();
+        double[][] x2 = new double[x.length][];
+        for (int r = 0; r < x.length; r++) {
+            x2[r] = new double[x[r].length];
+            for (int c = 0; c < x[r].length; c++) {
+                x2[r][c] = x[r][c] * (1.0 + Math.scalb(1.0, -52));
+            }
+        }
+        double[] w = Markowitz.minVarianceLongOnly(
+                Estimators.annualizeCov(Estimators.sampleCov(x2), 252));
+        double[] want = TestData.expectVector("minvar_longonly_qp", "w");
+        for (int i = 0; i < want.length; i++) {
+            assertEquals(want[i], w[i], 1e-13);
+        }
+        Backtest.Result res = Backtest.runBacktest(x2,
+                h -> Markowitz.minVarianceLongOnly(
+                        Estimators.annualizeCov(Estimators.sampleCov(h), 252)),
+                0.0, 500, 63);
+        assertEquals(TestData.expectScalar("turnover_minvar_longonly", "avg_turnover"),
+                res.avgTurnover(), 1e-12);
     }
 
     @Test

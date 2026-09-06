@@ -116,6 +116,75 @@ TEST(BlackLitterman, ConflictingExtremeViewsStayFinite) {
   }
 }
 
+TEST(BlackLitterman, RelativeViewSameLegsRejected) {
+  // PT-7 (MAJ-2): long == short must not become a silent absolute short view.
+  const std::vector<std::string>& names = testdata::returns_data().names;
+  portopt::View v;
+  v.type = "relative";
+  v.long_name = "US_EQ";
+  v.short_name = "US_EQ";
+  v.q = 0.02;
+  EXPECT_THROW(portopt::views_to_matrices({v}, names), std::invalid_argument);
+}
+
+TEST(BlackLitterman, ViewsParseErrorPaths) {
+  // PT-11: unknown asset, NaN q, duplicate names, empty views.
+  const std::vector<std::string>& names = testdata::returns_data().names;
+  portopt::View v;
+  v.type = "absolute";
+  v.asset = "NOPE";
+  v.q = 0.1;
+  EXPECT_THROW(portopt::views_to_matrices({v}, names), std::invalid_argument);
+  v.asset = "US_EQ";
+  v.q = std::nan("");
+  EXPECT_THROW(portopt::views_to_matrices({v}, names), std::invalid_argument);
+  v.q = 0.1;
+  std::vector<std::string> dup(names);
+  dup.push_back("US_EQ");
+  EXPECT_THROW(portopt::views_to_matrices({v}, dup), std::invalid_argument);
+  EXPECT_THROW(portopt::views_to_matrices({v}, {}), std::invalid_argument);
+  EXPECT_THROW(portopt::views_to_matrices({}, names), std::invalid_argument);
+  const portopt::ViewMatrices vm = portopt::views_to_matrices({v}, names);
+  EXPECT_EQ(vm.confidences[0], 1.0);
+}
+
+TEST(BlackLitterman, OmegaAndConfidencesTogetherRejected) {
+  // MIN-12: explicit Omega plus confidences would silently ignore the latter.
+  const Parts p = parts();
+  const Matrix omega =
+      portopt::default_omega(testdata::sigma_ann(), p.vm.p, p.tau, p.vm.confidences);
+  // bl_posterior_with_omega has no confidences parameter by design; the
+  // shared core rejects the combination, reachable through bl_weights'
+  // confidences + an explicit Omega only in the ports that allow both
+  // (Rust/Java). Here we assert the explicit-Omega path reproduces the
+  // confidence-scaled posterior exactly.
+  const portopt::BLResult a = portopt::bl_posterior_with_omega(
+      testdata::sigma_ann(), p.pi, p.vm.p, p.vm.q, p.tau, omega);
+  const portopt::BLResult b = portopt::bl_posterior(testdata::sigma_ann(), p.pi, p.vm.p,
+                                                    p.vm.q, p.tau, p.vm.confidences);
+  for (std::size_t i = 0; i < a.mu_post.size(); ++i) EXPECT_EQ(a.mu_post[i], b.mu_post[i]);
+}
+
+TEST(BlackLitterman, BlWeightsWithOmegaAndLeverage) {
+  const Parts p = parts();
+  const Matrix omega =
+      portopt::default_omega(testdata::sigma_ann(), p.vm.p, p.tau, p.vm.confidences);
+  portopt::BLResult res_a;
+  const Vector w_a = portopt::bl_weights_with_omega(testdata::sigma_ann(), p.pi, p.vm.p,
+                                                    p.vm.q, p.tau, omega, 0.0, &res_a);
+  portopt::BLResult res_b;
+  const Vector w_b = portopt::bl_weights(testdata::sigma_ann(), p.pi, p.vm.p, p.vm.q, p.tau,
+                                         0.0, p.vm.confidences, &res_b);
+  for (std::size_t i = 0; i < w_a.size(); ++i) {
+    EXPECT_NEAR(w_a[i], w_b[i], 1e-15);
+    EXPECT_NEAR(res_a.mu_post[i], res_b.mu_post[i], 1e-16);
+  }
+  EXPECT_GT(portopt::gross_leverage(w_b), 1.0);  // posterior shorts EU_EQ
+  EXPECT_THROW(portopt::bl_weights(testdata::sigma_ann(), p.pi, p.vm.p, p.vm.q, p.tau,
+                                   std::nan("")),
+               std::invalid_argument);
+}
+
 TEST(BlackLitterman, ErrorPaths) {
   const Parts p = parts();
   const Matrix& sig = testdata::sigma_ann();

@@ -7,7 +7,7 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
-/** Unit and property tests for the Markowitz closed forms, projection and PGD. */
+/** Unit and property tests for the Markowitz closed forms, projection and the dual active-set QP. */
 public class MarkowitzTest {
 
     private static double portReturn(double[] w) {
@@ -52,6 +52,16 @@ public class MarkowitzTest {
     public void frontierVarianceConvexInTarget() {
         Markowitz.Frontier front = Markowitz.efficientFrontier(
                 TestData.muAnnualized(), TestData.sigmaAnnualized(), 25);
+        double muMax = TestData.muAnnualized()[0];
+        for (double m : TestData.muAnnualized()) {
+            muMax = Math.max(muMax, m);
+        }
+        assertEquals("last grid point is exactly max(mu)", muMax, front.targets()[24], 0.0);
+        for (int k : new int[] {0, 7, 24}) {
+            assertArrayEquals("sweep equals the point function", Markowitz.frontierWeights(
+                    TestData.muAnnualized(), TestData.sigmaAnnualized(), front.targets()[k]),
+                    front.weights()[k], 1e-15);
+        }
         double[] v = front.variances();
         for (int k = 1; k + 1 < v.length; k++) {
             double secondDiff = v[k + 1] - 2.0 * v[k] + v[k - 1];
@@ -104,7 +114,7 @@ public class MarkowitzTest {
             maxMu = Math.max(maxMu, v);
         }
         final double rf = maxMu + 0.01; // above every expected return
-        assertThrows(IllegalArgumentException.class, () -> Markowitz.tangencyWeights(
+        assertThrows(Markowitz.TangencyUndefinedException.class, () -> Markowitz.tangencyWeights(
                 TestData.muAnnualized(), TestData.sigmaAnnualized(), rf));
     }
 
@@ -119,8 +129,16 @@ public class MarkowitzTest {
                 () -> Markowitz.tangencyWeights(mu1, sigma1, 0.08));
         assertArrayEquals(new double[] {1.0},
                 Markowitz.frontierWeights(mu1, sigma1, 0.07), 0.0);
+        assertArrayEquals(new double[] {1.0}, Markowitz.minVarianceLongOnly(sigma1), 0.0);
         assertThrows(IllegalArgumentException.class,
                 () -> Markowitz.frontierWeights(mu1, sigma1, 0.05));
+        // MIN-11: the n = 1 paths validate the covariance too.
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.frontierWeights(mu1, new double[][] {{-1.0}}, 0.07));
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.tangencyWeights(mu1, new double[][] {{0.0}}, 0.02));
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.efficientFrontier(mu1, sigma1, 5));
     }
 
     @Test
@@ -198,47 +216,227 @@ public class MarkowitzTest {
     }
 
     @Test
-    public void pgdMatchesClosedFormWhenConstraintsInactive() {
-        // Wide box bounds leave only sum(w) = 1 active, so PGD must agree with
-        // the closed-form unconstrained minimum-variance portfolio.
+    public void qpMatchesClosedFormWhenConstraintsInactive() {
+        // Wide box bounds leave only sum(w) = 1 active, so the QP must agree with
+        // the closed-form unconstrained minimum-variance portfolio to rounding.
         int n = TestData.sigmaAnnualized().length;
         double[] lb = new double[n];
         double[] ub = new double[n];
         java.util.Arrays.fill(lb, -10.0);
         java.util.Arrays.fill(ub, 10.0);
-        double[] wPgd = Markowitz.minVarianceLongOnly(TestData.sigmaAnnualized(), lb, ub);
-        double[] wClosed = Markowitz.minVarianceWeights(TestData.sigmaAnnualized());
-        assertArrayEquals(wClosed, wPgd, 1e-6);
+        Markowitz.QpResult res = Markowitz.minVarianceLongOnlySolve(
+                TestData.sigmaAnnualized(), lb, ub, Markowitz.QP_MAX_ITER);
+        assertTrue(res.converged());
+        assertTrue(res.iterations() <= 2);
+        assertArrayEquals(Markowitz.minVarianceWeights(TestData.sigmaAnnualized()),
+                res.weights(), 1e-14);
     }
 
     @Test
-    public void pgdLongOnlyIsFeasibleAndNoWorseThanEqualWeight() {
-        double[] w = Markowitz.minVarianceLongOnly(TestData.sigmaAnnualized());
-        assertEquals(1.0, Linalg.sum(w), 1e-10);
+    public void qpLongOnlyCertifiedAndKkt() {
+        double[][] sig = TestData.sigmaAnnualized();
+        Markowitz.QpResult res = Markowitz.minVarianceLongOnlySolve(
+                sig, null, null, Markowitz.QP_MAX_ITER);
+        assertTrue(res.converged());
+        assertTrue(res.kktResidual() < 1e-12);
+        double[] w = res.weights();
+        assertEquals(1.0, Linalg.sum(w), 1e-12);
+        // KKT for {sum w = 1, w >= 0}: constant gradient on the support, >= off it.
+        double[] g = Linalg.matVec(sig, w);
+        double lam = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < w.length; i++) {
+            assertTrue("long-only", w[i] >= 0.0);
+            if (w[i] > 1e-14) {
+                lam = Math.min(lam, g[i]);
+            }
+        }
+        for (int i = 0; i < w.length; i++) {
+            if (w[i] > 1e-14) {
+                assertEquals(lam, g[i], 1e-13);
+            } else {
+                assertTrue(g[i] >= lam - 1e-13);
+            }
+        }
         double[] eq = new double[w.length];
         java.util.Arrays.fill(eq, 1.0 / w.length);
-        for (double v : w) {
-            assertTrue("long-only", v >= -1e-12);
-        }
-        assertTrue("PGD at least as good as equal weight",
+        assertTrue("QP at least as good as equal weight",
                 portVariance(w) <= portVariance(eq) + 1e-15);
+        assertTrue("cannot beat the unconstrained optimum",
+                portVariance(w) >= portVariance(Markowitz.minVarianceWeights(sig)) - 1e-14);
     }
 
     @Test
-    public void constrainedFrontierPenaltyKeepsReturnNearTarget() {
-        double target = 0.06;
-        double[] w = Markowitz.constrainedFrontierWeights(
-                TestData.muAnnualized(), TestData.sigmaAnnualized(), target);
-        // The achieved return deviates from the target by O(1/penalty).
-        assertEquals(target, portReturn(w), 1e-3);
-        assertEquals(1.0, Linalg.sum(w), 1e-10);
+    public void qpBoxBoundsRespectedAndOptimal() {
+        // PT-14: lb = 0.02, ub = 0.40 hold exactly; beats projected random points.
+        double[][] sig = TestData.sigmaAnnualized();
+        Markowitz.QpResult res = Markowitz.minVarianceLongOnlySolve(
+                sig, new double[] {0.02}, new double[] {0.40}, Markowitz.QP_MAX_ITER);
+        assertTrue(res.converged());
+        assertTrue(res.kktResidual() < 1e-12);
+        for (double v : res.weights()) {
+            assertTrue(v >= 0.02 && v <= 0.40);
+        }
+        assertEquals(1.0, Linalg.sum(res.weights()), 1e-12);
+        double var = portVariance(res.weights());
+        java.util.Random rng = new java.util.Random(3);
+        for (int trial = 0; trial < 20; trial++) {
+            double[] v = new double[8];
+            for (int i = 0; i < 8; i++) {
+                v[i] = rng.nextGaussian();
+            }
+            double[] z = Markowitz.projectSimplexBox(v, 1.0, new double[] {0.02}, new double[] {0.40});
+            assertTrue(var <= portVariance(z) + 1e-15);
+        }
     }
 
     @Test
-    public void pgdIsDeterministic() {
+    public void constrainedFrontierReportsConvergenceAndHitsTarget() {
+        // PT-3: every point certified, target met exactly, variance monotone.
+        double[] mu = TestData.muAnnualized();
+        double[][] sig = TestData.sigmaAnnualized();
+        Markowitz.QpResult res = Markowitz.constrainedFrontierSolve(
+                mu, sig, 0.08, null, null, Markowitz.QP_MAX_ITER);
+        assertTrue(res.converged());
+        assertTrue(res.kktResidual() < 1e-9);
+        assertEquals(0.08, portReturn(res.weights()), 1e-12);
+        assertEquals(1.0, Linalg.sum(res.weights()), 1e-12);
+        Markowitz.Frontier fc = Markowitz.constrainedFrontier(mu, sig, 25);
+        double[] wLo = Markowitz.minVarianceLongOnly(sig);
+        double muMax = mu[0];
+        for (double v : mu) {
+            muMax = Math.max(muMax, v);
+        }
+        assertEquals(portReturn(wLo), fc.targets()[0], 1e-15);
+        assertEquals(muMax, fc.targets()[24], 0.0);
+        for (int k = 0; k < 25; k++) {
+            assertEquals("target " + k, fc.targets()[k], portReturn(fc.weights()[k]), 1e-12);
+            for (double v : fc.weights()[k]) {
+                assertTrue(v >= 0.0);
+            }
+            assertEquals(portVariance(fc.weights()[k]), fc.variances()[k], 1e-15);
+            if (k > 0) {
+                assertTrue("monotone variance " + k, fc.variances()[k] >= fc.variances()[k - 1] - 1e-14);
+            }
+        }
+        assertArrayEquals(wLo, fc.weights()[0], 1e-15);
+        for (int i = 0; i < 8; i++) {
+            assertEquals(mu[i] == muMax ? 1.0 : 0.0, fc.weights()[24][i], 1e-15);
+        }
+    }
+
+    @Test
+    public void constrainedFrontierRejectsUnattainableTargets() {
+        double[] mu = TestData.muAnnualized();
+        double[][] sig = TestData.sigmaAnnualized();
+        double rLo = portReturn(Markowitz.minVarianceLongOnly(sig));
+        double muMax = mu[0];
+        for (double v : mu) {
+            muMax = Math.max(muMax, v);
+        }
+        final double above = muMax + 1e-3;
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.constrainedFrontierWeights(mu, sig, rLo - 1e-3));
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.constrainedFrontierWeights(mu, sig, above));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.constrainedFrontierWeights(
+                mu, sig, 0.09, null, new double[] {0.4}));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.constrainedFrontierWeights(
+                mu, sig, Double.POSITIVE_INFINITY));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.constrainedFrontierSolve(
+                mu, sig, 0.06, null, null, 0));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.constrainedFrontier(mu, sig, 1));
+    }
+
+    @Test
+    public void attainableReturnRangeAndDegenerateInputs() {
+        double[] mu = TestData.muAnnualized();
+        double[][] sig = TestData.sigmaAnnualized();
+        double[] r = Markowitz.attainableReturnRange(mu, null, null);
+        double[] sorted = mu.clone();
+        java.util.Arrays.sort(sorted);
+        assertEquals(sorted[0], r[0], 0.0);
+        assertEquals(sorted[7], r[1], 0.0);
+        double[] rc = Markowitz.attainableReturnRange(mu, new double[] {0.0}, new double[] {0.4});
+        assertEquals(0.4 * sorted[7] + 0.4 * sorted[6] + 0.2 * sorted[5], rc[1], 1e-15);
+        assertEquals(0.4 * sorted[0] + 0.4 * sorted[1] + 0.2 * sorted[2], rc[0], 1e-15);
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.attainableReturnRange(mu, new double[] {0.2}, null));
+        // Fixed asset (lb == ub), tied top returns with caps, all-equal returns.
+        double[] lb = new double[8];
+        double[] ub = new double[8];
+        java.util.Arrays.fill(ub, Double.POSITIVE_INFINITY);
+        lb[5] = 0.30;
+        ub[5] = 0.30;
+        Markowitz.QpResult fixed = Markowitz.minVarianceLongOnlySolve(sig, lb, ub, Markowitz.QP_MAX_ITER);
+        assertTrue(fixed.converged());
+        assertEquals(0.30, fixed.weights()[5], 0.0);
+        double[] mu2 = mu.clone();
+        mu2[1] = mu2[0];
+        double mu2Max = mu2[0];
+        for (double v : mu2) {
+            mu2Max = Math.max(mu2Max, v);
+        }
+        Markowitz.QpResult tie = Markowitz.constrainedFrontierSolve(
+                mu2, sig, mu2Max, new double[] {0.0}, new double[] {0.7}, Markowitz.QP_MAX_ITER);
+        assertTrue(tie.converged());
+        assertTrue(tie.kktResidual() < 1e-12);
+        assertEquals(1.0, tie.weights()[0] + tie.weights()[1], 1e-12);
+        double[] flatMu = new double[8];
+        java.util.Arrays.fill(flatMu, 0.05);
+        Markowitz.QpResult flat = Markowitz.constrainedFrontierSolve(
+                flatMu, sig, 0.05, null, null, Markowitz.QP_MAX_ITER);
+        assertTrue(flat.converged());
+        assertArrayEquals(Markowitz.minVarianceLongOnly(sig), flat.weights(), 0.0);
+    }
+
+    @Test
+    public void frontierGridWhenGmvReturnExceedsMaxMu() {
+        // MAJ-3: GMV shorts the low-return asset, A/C = 0.1185 > max(mu) = 0.10.
+        double[] mu = {0.10, 0.05};
+        double[][] sig = {{0.01, 0.027}, {0.027, 0.09}};
+        Markowitz.TwoFundScalars sc = Markowitz.twoFundScalars(mu, sig);
+        assertTrue(sc.a() / sc.c() > 0.10);
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.efficientFrontier(mu, sig, 25));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.constrainedFrontier(mu, sig, 25));
+        double[] w = Markowitz.frontierWeights(mu, sig, 0.13);
+        assertEquals(0.13, Linalg.dot(mu, w), 1e-12);
+    }
+
+    @Test
+    public void tangencyNearGmvRejected() {
+        // MAJ-1: rf within 1e-6 (relative) of A/C cancels A - rf*C catastrophically.
+        double[] mu = TestData.muAnnualized();
+        double[][] sig = TestData.sigmaAnnualized();
+        Markowitz.TwoFundScalars sc = Markowitz.twoFundScalars(mu, sig);
+        double rGmv = sc.a() / sc.c();
+        assertThrows(Markowitz.TangencyUndefinedException.class,
+                () -> Markowitz.tangencyWeights(mu, sig, rGmv - 1e-13));
+        assertThrows(Markowitz.TangencyUndefinedException.class,
+                () -> Markowitz.tangencyWeights(mu, sig, rGmv - 1e-9));
+        double[] w = Markowitz.tangencyWeights(mu, sig, rGmv - 1e-3);
+        assertEquals(1.0, Linalg.sum(w), 1e-8);
+        double l1 = 0.0;
+        for (double v : w) {
+            l1 += Math.abs(v);
+        }
+        assertEquals(l1, Markowitz.grossLeverage(w), 1e-12);
+        assertEquals(1.0, Markowitz.grossLeverage(new double[] {0.2, 0.3, 0.5}), 1e-15);
+        assertEquals(2.0, Markowitz.grossLeverage(new double[] {1.5, -0.5}), 1e-15);
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.grossLeverage(new double[0]));
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.grossLeverage(new double[] {Double.NaN}));
+    }
+
+    @Test
+    public void qpIsDeterministic() {
         double[] w1 = Markowitz.minVarianceLongOnly(TestData.sigmaAnnualized());
         double[] w2 = Markowitz.minVarianceLongOnly(TestData.sigmaAnnualized());
         assertArrayEquals("bit-identical repeated runs", w1, w2, 0.0);
+        Markowitz.Frontier a = Markowitz.constrainedFrontier(TestData.muAnnualized(), TestData.sigmaAnnualized(), 7);
+        Markowitz.Frontier b = Markowitz.constrainedFrontier(TestData.muAnnualized(), TestData.sigmaAnnualized(), 7);
+        for (int k = 0; k < 7; k++) {
+            assertArrayEquals(a.weights()[k], b.weights()[k], 0.0);
+        }
     }
 
     @Test
@@ -251,7 +449,10 @@ public class MarkowitzTest {
                 TestData.muAnnualized(), TestData.sigmaAnnualized(), Double.POSITIVE_INFINITY));
         assertThrows(IllegalArgumentException.class, () -> Markowitz.efficientFrontier(
                 TestData.muAnnualized(), TestData.sigmaAnnualized(), 1)); // < 2 points
-        assertThrows(IllegalArgumentException.class, () -> Markowitz.constrainedFrontierWeights(
-                TestData.muAnnualized(), TestData.sigmaAnnualized(), 0.06, -1.0, null, null));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.projectSimplexBox(
+                new double[] {0.5, 0.5}, 1.0, new double[] {Double.NEGATIVE_INFINITY}, null));
+        // Singular covariance rejected by the Cholesky gate in the QP too.
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.minVarianceLongOnly(new double[][] {{0.04, 0.04}, {0.04, 0.04}}));
     }
 }

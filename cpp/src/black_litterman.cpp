@@ -118,6 +118,14 @@ Vector implied_equilibrium_returns(const Matrix& sigma, const Vector& w_mkt,
 
 ViewMatrices views_to_matrices(const std::vector<View>& views,
                                const std::vector<std::string>& asset_names) {
+  if (asset_names.empty()) throw std::invalid_argument("asset_names must be non-empty");
+  for (std::size_t i = 0; i < asset_names.size(); ++i) {
+    for (std::size_t j = i + 1; j < asset_names.size(); ++j) {
+      if (asset_names[i] == asset_names[j]) {
+        throw std::invalid_argument("asset_names contains duplicates");
+      }
+    }
+  }
   if (views.empty()) throw std::invalid_argument("views list must be non-empty");
   const std::size_t k = views.size();
   const std::size_t n = asset_names.size();
@@ -127,13 +135,22 @@ ViewMatrices views_to_matrices(const std::vector<View>& views,
     if (view.type == "absolute") {
       out.p(i, name_index(asset_names, view.asset)) = 1.0;
     } else if (view.type == "relative") {
-      out.p(i, name_index(asset_names, view.long_name)) = 1.0;
-      out.p(i, name_index(asset_names, view.short_name)) = -1.0;
+      const std::size_t i_long = name_index(asset_names, view.long_name);
+      const std::size_t i_short = name_index(asset_names, view.short_name);
+      if (i_long == i_short) {
+        std::ostringstream msg;
+        msg << "view " << i << ": relative view: long and short legs must differ";
+        throw std::invalid_argument(msg.str());
+      }
+      out.p(i, i_long) = 1.0;
+      out.p(i, i_short) = -1.0;
     } else {
       throw std::invalid_argument("unknown view type: '" + view.type + "'");
     }
     if (!std::isfinite(view.q)) {
-      throw std::invalid_argument("view q values must be finite");
+      std::ostringstream msg;
+      msg << "view " << i << ": q must be finite";
+      throw std::invalid_argument(msg.str());
     }
     out.q[i] = view.q;
     if (!(std::isfinite(view.confidence) && view.confidence > 0.0)) {
@@ -203,6 +220,10 @@ BLResult bl_posterior_core(const Matrix& sigma, const Vector& pi, const Matrix& 
   if (omega == nullptr) {
     om = default_omega(sigma, p, t, confidences);
   } else {
+    if (!confidences.empty()) {
+      throw std::invalid_argument(
+          "confidences are only used with the default Omega; pass one or the other");
+    }
     check_square_symmetric(*omega);
     if (omega->rows() != k) {
       std::ostringstream msg;
@@ -242,7 +263,7 @@ BLResult bl_posterior_core(const Matrix& sigma, const Vector& pi, const Matrix& 
     mu_post[j] += acc;
   }
 
-  // M = tau S - B' A_k^-1 B, computed via n solves against B's columns.
+  // M = tau S - B' A_k^-1 B: A_k^-1 B via n solves, one per column of B.
   Matrix ainv_b(k, n, 0.0);
   for (std::size_t j = 0; j < n; ++j) {
     Vector col(k, 0.0);
@@ -278,7 +299,18 @@ BLResult bl_posterior_with_omega(const Matrix& sigma, const Vector& pi, const Ma
 Vector bl_weights(const Matrix& sigma, const Vector& pi, const Matrix& p,
                   const Vector& q, double tau, double rf, const Vector& confidences,
                   BLResult* result) {
+  if (!std::isfinite(rf)) throw std::invalid_argument("rf must be finite");
   BLResult res = bl_posterior(sigma, pi, p, q, tau, confidences);
+  Vector w = tangency_weights(res.mu_post, res.sigma_post, rf);
+  if (result != nullptr) *result = std::move(res);
+  return w;
+}
+
+Vector bl_weights_with_omega(const Matrix& sigma, const Vector& pi, const Matrix& p,
+                             const Vector& q, double tau, const Matrix& omega, double rf,
+                             BLResult* result) {
+  if (!std::isfinite(rf)) throw std::invalid_argument("rf must be finite");
+  BLResult res = bl_posterior_with_omega(sigma, pi, p, q, tau, omega);
   Vector w = tangency_weights(res.mu_post, res.sigma_post, rf);
   if (result != nullptr) *result = std::move(res);
   return w;
