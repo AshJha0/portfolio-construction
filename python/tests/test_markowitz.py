@@ -29,6 +29,59 @@ def _slsqp(sig, mu, target, lb, ub):
     return res.x
 
 
+def _reference_objective(sig, mu, target, lb, ub):
+    """Variance 0.5 w'Sw of a feasible reference point from scipy.
+
+    SLSQP is tried first. Its convergence on random problems depends on the
+    platform's BLAS (CI saw "Iteration limit reached" on macOS and "Positive
+    directional derivative" on Windows for problems it solves on Linux), so a
+    failed run falls back to trust-constr. Any point that is feasible to 1e-9
+    bounds the optimum from above, which is all the comparison needs; the
+    QP's own optimality is checked separately through its KKT certificate.
+    """
+    from scipy.optimize import Bounds, LinearConstraint
+
+    n = sig.shape[0]
+    lo = np.broadcast_to(np.asarray(lb, dtype=float), (n,))
+    hi = np.broadcast_to(np.asarray(ub, dtype=float), (n,))
+
+    def feasible(w):
+        ok = abs(w.sum() - 1.0) <= 1e-9 and np.all(w >= lo - 1e-9) and np.all(w <= hi + 1e-9)
+        return ok and (target is None or abs(mu @ w - target) <= 1e-9)
+
+    cons = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+    if target is not None:
+        cons.append({"type": "eq", "fun": lambda w: mu @ w - target})
+    x0 = np.clip(np.full(n, 1.0 / n), lo, hi)
+    res = minimize(
+        lambda w: 0.5 * w @ sig @ w,
+        x0,
+        jac=lambda w: sig @ w,
+        method="SLSQP",
+        bounds=[(lo[i], None if hi[i] == np.inf else hi[i]) for i in range(n)],
+        constraints=cons,
+        options={"ftol": 1e-15, "maxiter": 1000},
+    )
+    candidates = [res.x] if res.success and feasible(res.x) else []
+    if not candidates:
+        rows = [np.ones(n)] + ([mu] if target is not None else [])
+        rhs = [1.0] + ([target] if target is not None else [])
+        tc = minimize(
+            lambda w: 0.5 * w @ sig @ w,
+            x0,
+            jac=lambda w: sig @ w,
+            hess=lambda w: sig,
+            method="trust-constr",
+            bounds=Bounds(lo, hi),
+            constraints=[LinearConstraint(np.array(rows), rhs, rhs)],
+            options={"gtol": 1e-14, "xtol": 1e-15, "maxiter": 20000},
+        )
+        if feasible(tc.x):
+            candidates.append(tc.x)
+    assert candidates, "no scipy reference point was feasible"
+    return min(float(w @ sig @ w) for w in candidates)
+
+
 def _kkt_residual_longonly(w, grad):
     """Projected-gradient KKT residual for {sum w = 1, w >= 0}: with the
     equality multiplier lam = min_i grad_i over the support, every free
@@ -401,14 +454,14 @@ def test_qp_random_problems_vs_scipy():
         lb, ub = 0.0, float(rng.uniform(1.0 / n + 0.05, 1.0))
         res = po.min_variance_longonly_solve(sig, lb=lb, ub=ub)
         assert res.converged
-        w_ref = _slsqp(sig, None, None, lb, ub)
-        assert res.weights @ sig @ res.weights <= w_ref @ sig @ w_ref + 1e-12
+        v_ref = _reference_objective(sig, None, None, lb, ub)
+        assert res.weights @ sig @ res.weights <= v_ref + 1e-12
         r_min, r_max = po.attainable_return_range(mu, lb, ub)
         tgt = mu @ res.weights + 0.5 * (r_max - mu @ res.weights)
         fr = po.constrained_frontier_solve(mu, sig, tgt, lb=lb, ub=ub)
         assert fr.converged and abs(mu @ fr.weights - tgt) < 1e-12
-        w_ref = _slsqp(sig, mu, tgt, lb, ub)
-        assert fr.weights @ sig @ fr.weights <= w_ref @ sig @ w_ref + 1e-12
+        v_ref = _reference_objective(sig, mu, tgt, lb, ub)
+        assert fr.weights @ sig @ fr.weights <= v_ref + 1e-12
 
 
 def test_qp_determinism(moments):

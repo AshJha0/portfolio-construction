@@ -32,8 +32,10 @@ inline const std::map<std::string, GoldenCase>& golden() {
     std::map<std::string, GoldenCase> out;
     for (const mini_json::Value& c : doc.at("cases").arr) {
       GoldenCase gc;
-      for (const auto& kv : c.at("inputs").obj) gc.inputs[kv.first] = kv.second.number;
-      for (const auto& kv : c.at("expect").obj) gc.expect[kv.first] = kv.second.number;
+      const mini_json::Value& in = c.at("inputs");
+      for (std::size_t i = 0; i < in.keys.size(); ++i) gc.inputs[in.keys[i]] = in.vals[i].number;
+      const mini_json::Value& ex = c.at("expect");
+      for (std::size_t i = 0; i < ex.keys.size(); ++i) gc.expect[ex.keys[i]] = ex.vals[i].number;
       gc.tol = c.at("tol").number;
       out[c.at("name").str] = gc;
     }

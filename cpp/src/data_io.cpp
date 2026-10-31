@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace portopt {
@@ -60,17 +61,20 @@ class JsonScanner {
     double number = 0.0;
     std::string str;
     std::vector<Node> arr;
-    std::vector<std::pair<std::string, Node>> obj;
+    // Object members as parallel key/value vectors: std::pair<std::string, Node>
+    // would need Node complete here, and Node is still being defined.
+    std::vector<std::string> keys;
+    std::vector<Node> vals;
 
     const Node& at(const std::string& key) const {
-      for (const auto& kv : obj) {
-        if (kv.first == key) return kv.second;
+      for (std::size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i] == key) return vals[i];
       }
       throw std::runtime_error("json: missing key '" + key + "'");
     }
     bool has(const std::string& key) const {
-      for (const auto& kv : obj) {
-        if (kv.first == key) return true;
+      for (const auto& k : keys) {
+        if (k == key) return true;
       }
       return false;
     }
@@ -184,7 +188,8 @@ class JsonScanner {
       std::string key = string_lit();
       ws();
       expect(':');
-      n.obj.emplace_back(std::move(key), value());
+      n.keys.push_back(std::move(key));
+      n.vals.push_back(value());
       ws();
       const char c = peek();
       ++pos_;
