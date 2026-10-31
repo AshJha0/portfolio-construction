@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <random>
+#include <vector>
 
 #include "portopt/markowitz.hpp"
 #include "test_data.hpp"
@@ -418,4 +419,56 @@ TEST(Markowitz, FrontierErrorPaths) {
   // Singular covariance rejected by the Cholesky gate in the QP too.
   Matrix dup(2, 2, 0.04);
   EXPECT_THROW(portopt::min_variance_longonly(dup), std::domain_error);
+}
+
+TEST(Markowitz, KktCertificateChecksDualFeasibility) {
+  // min 1/2 |w|^2 s.t. sum w = 1, w >= 0 (S = I, n = 2). The true active
+  // set {sum} gives w = (1/2, 1/2), u = 1/2 and is certified. Forcing the
+  // wrong active set {sum, w_0 >= 0} gives w = (0, 1): primal feasible and
+  // stationary (S w = 1*(1,1) - 1*e_0), but the bound multiplier is -1.
+  Matrix s(2, 2, 0.0);
+  s(0, 0) = 1.0;
+  s(1, 1) = 1.0;
+  const std::vector<Vector> normals{Vector{1.0, 1.0}, Vector{1.0, 0.0}, Vector{0.0, 1.0}};
+  const Vector rhs{1.0, 0.0, 0.0};
+  auto ok = portopt::detail::kkt_certificate(s, normals, rhs, 1, {0}, Vector{0.5},
+                                             Vector{0.5, 0.5});
+  EXPECT_TRUE(ok.certified);
+  EXPECT_EQ(ok.residual, 0.0);
+  auto bad = portopt::detail::kkt_certificate(s, normals, rhs, 1, {0, 1}, Vector{1.0, -1.0},
+                                              Vector{0.0, 1.0});
+  EXPECT_FALSE(bad.certified);
+  EXPECT_EQ(bad.residual, 1.0);
+  // A rounding-level negative bound multiplier is tolerated (scaled tol).
+  auto tiny = portopt::detail::kkt_certificate(s, normals, rhs, 1, {0, 1},
+                                               Vector{0.5, -1e-12}, Vector{0.5, 0.5});
+  EXPECT_TRUE(tiny.certified);
+  EXPECT_NEAR(tiny.residual, 1e-12, 1e-15);
+  // An equality multiplier may be negative.
+  const std::vector<Vector> eq_only{Vector{1.0, 1.0}};
+  auto neg_eq = portopt::detail::kkt_certificate(s, eq_only, Vector{-1.0}, 1, {0},
+                                                 Vector{-0.5}, Vector{-0.5, -0.5});
+  EXPECT_TRUE(neg_eq.certified);
+}
+
+TEST(Markowitz, QpWithActiveBoundsStillCertified) {
+  // Dual feasibility holds at the true optimum: problems with several
+  // active bounds stay certified with the same residual bound as before.
+  const Matrix& sig = testdata::sigma_ann();
+  const Vector& mu = testdata::mu_ann();
+  const std::size_t n = sig.rows();
+  const double bounds[3][2] = {{0.0, kInf}, {0.02, 0.40}, {0.0, 0.25}};
+  for (const auto& b : bounds) {
+    const portopt::QpResult res =
+        portopt::min_variance_longonly_solve(sig, Vector(n, b[0]), Vector(n, b[1]));
+    EXPECT_TRUE(res.converged) << b[0] << " " << b[1];
+    EXPECT_LT(res.kkt_residual, 1e-12);
+    bool any_active = false;
+    for (double v : res.weights) any_active = any_active || v == b[0] || v == b[1];
+    EXPECT_TRUE(any_active);
+  }
+  const portopt::QpResult fr =
+      portopt::constrained_frontier_solve(mu, sig, 0.07, Vector(n, 0.0), Vector(n, 0.5));
+  EXPECT_TRUE(fr.converged);
+  EXPECT_LT(fr.kkt_residual, 1e-9);
 }

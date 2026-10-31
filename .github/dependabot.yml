@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /python
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: maven
+    directory: /java
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # The tag is the Rust version the MSRV job tests, not an action version.
+      - dependency-name: "dtolnay/rust-toolchain"
+    groups:
+      actions:
+        patterns: ["*"]

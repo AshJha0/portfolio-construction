@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.ashjha0</groupId>
+  <artifactId>portopt</artifactId>
+  <version>1.2.0</version>
+  <packaging>jar</packaging>
+  <name>portopt</name>
+  <description>Portfolio construction: estimators, Markowitz, Black-Litterman,
+    risk parity and a walk-forward backtest (Java port).</description>
+  <url>https://github.com/AshJha0/portfolio-construction</url>
+  <licenses>
+    <license><name>MIT</name><url>https://opensource.org/licenses/MIT</url></license>
+  </licenses>
+
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+  </properties>
+
+  <dependencies>
+    <!-- The suite is JUnit 4 source; surefire runs it with its JUnit 4 provider. -->
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.16.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+            <arg>-Werror</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.6.1</version>
+        <configuration>
+          <!-- Tests read ../data/golden/golden.json relative to java/. -->
+          <workingDirectory>${project.basedir}</workingDirectory>
+        </configuration>
+      </plugin>
+      <!-- mvn -B -q exec:java runs the end-to-end demo against ../data. -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.6.4</version>
+        <configuration>
+          <mainClass>com.quant.portopt.Demo</mainClass>
+          <workingDirectory>${project.basedir}</workingDirectory>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- Line/branch coverage (JaCoCo): mvn -Pcoverage verify writes
+         target/site/jacoco/{index.html,jacoco.xml,jacoco.csv}. -->
+    <profile>
+      <id>coverage</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.jacoco</groupId>
+            <artifactId>jacoco-maven-plugin</artifactId>
+            <version>0.8.16</version>
+            <executions>
+              <execution>
+                <id>prepare-agent</id>
+                <goals><goal>prepare-agent</goal></goals>
+              </execution>
+              <execution>
+                <id>report</id>
+                <phase>verify</phase>
+                <goals><goal>report</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

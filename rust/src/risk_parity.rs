@@ -127,6 +127,8 @@ pub struct CcdResult {
 /// # Errors
 /// [`PortOptError::NotPositiveDefinite`] for singular / non-PSD `sigma`;
 /// [`PortOptError::InvalidInput`] for bad budgets or parameters.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0.0)` is deliberate: it rejects NaN as well as non-positive values
+#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
 pub fn risk_budget_solve(
     sigma: &Matrix,
     budgets: Option<&[f64]>,
@@ -178,19 +180,74 @@ pub fn risk_budget_solve(
     })
 }
 
-/// Risk-budget weights (weights only; see [`risk_budget_solve`]).
+/// Risk-budget weights (weights only; see [`risk_budget_solve`]) at the
+/// pinned [`CCD_TOL`] and [`CCD_MAX_SWEEPS`].
+///
+/// # Errors
+/// As [`risk_budget_weights_with`].
 pub fn risk_budget_weights(sigma: &Matrix, budgets: Option<&[f64]>) -> Result<Vec<f64>> {
-    Ok(risk_budget_solve(sigma, budgets, CCD_TOL, CCD_MAX_SWEEPS)?.weights)
+    risk_budget_weights_with(sigma, budgets, CCD_TOL, CCD_MAX_SWEEPS)
 }
 
-/// Equal-risk-contribution weights (equal budgets `b_i = 1/n`).
+/// Risk-budget weights with an explicit tolerance and sweep cap.
+///
+/// # Errors
+/// The errors of [`risk_budget_solve`], plus [`PortOptError::Undefined`]
+/// if the CCD hits the sweep cap before the sweep-level step falls below
+/// `tol`; use [`risk_budget_solve`] to inspect the unconverged iterate.
+pub fn risk_budget_weights_with(
+    sigma: &Matrix,
+    budgets: Option<&[f64]>,
+    tol: f64,
+    max_sweeps: usize,
+) -> Result<Vec<f64>> {
+    let res = risk_budget_solve(sigma, budgets, tol, max_sweeps)?;
+    if !res.converged {
+        return Err(PortOptError::Undefined(format!(
+            "risk_budget_weights: CCD did not converge within {} sweeps (tol {:.3e});              use risk_budget_solve to inspect the iterate",
+            res.sweeps, tol
+        )));
+    }
+    Ok(res.weights)
+}
+
+/// Equal-risk-contribution weights (equal budgets `b_i = 1/n`) at the
+/// pinned [`CCD_TOL`] and [`CCD_MAX_SWEEPS`].
+///
+/// # Errors
+/// As [`risk_budget_weights_with`].
 pub fn erc_weights(sigma: &Matrix) -> Result<Vec<f64>> {
-    risk_budget_weights(sigma, None)
+    erc_weights_with(sigma, CCD_TOL, CCD_MAX_SWEEPS)
+}
+
+/// Equal-risk-contribution weights with an explicit tolerance and sweep cap.
+///
+/// # Errors
+/// As [`risk_budget_weights_with`].
+pub fn erc_weights_with(sigma: &Matrix, tol: f64, max_sweeps: usize) -> Result<Vec<f64>> {
+    risk_budget_weights_with(sigma, None, tol, max_sweeps)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weights_reject_unconverged_ccd() {
+        let sig = Matrix::from_rows(&[
+            vec![0.04, 0.006, 0.002],
+            vec![0.006, 0.09, 0.009],
+            vec![0.002, 0.009, 0.16],
+        ])
+        .unwrap();
+        let err = erc_weights_with(&sig, CCD_TOL, 2).unwrap_err();
+        assert!(matches!(err, PortOptError::Undefined(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("within 2 sweeps"), "{msg}");
+        assert!(msg.contains("tol 1.000e-10"), "{msg}");
+        // The pinned defaults converge on the same input.
+        assert!(erc_weights(&sig).is_ok());
+    }
 
     #[test]
     fn erc_diagonal_equals_inverse_vol() {
@@ -208,11 +265,8 @@ mod tests {
         let s1 = 0.2_f64;
         let s2 = 0.1_f64;
         let rho = 0.5;
-        let sig = Matrix::from_rows(&[
-            vec![s1 * s1, rho * s1 * s2],
-            vec![rho * s1 * s2, s2 * s2],
-        ])
-        .unwrap();
+        let sig = Matrix::from_rows(&[vec![s1 * s1, rho * s1 * s2], vec![rho * s1 * s2, s2 * s2]])
+            .unwrap();
         let w = erc_weights(&sig).unwrap();
         let expect0 = (1.0 / s1) / (1.0 / s1 + 1.0 / s2);
         assert!((w[0] - expect0).abs() < 1e-9);

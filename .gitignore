@@ -1,7 +1,23 @@
 # build artefacts (never committed)
-cpp/build/
+cpp/build*/
 rust/target/
 java/out/
+java/target/
+out/
+
+# Python
 __pycache__/
 *.pyc
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# editors and OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

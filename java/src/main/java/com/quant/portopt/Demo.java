@@ -16,7 +16,7 @@ import java.util.Map;
  *
  * <p>Prints: estimator table, unconstrained + long-only frontier sweep,
  * Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
- * contributions, and a quarterly-rebalance comparison across six methods.
+ * contributions, and a 63-day re-estimation backtest across six methods.
  */
 public final class Demo {
 
@@ -59,7 +59,7 @@ public final class Demo {
         double tau = (Double) viewsDoc.get("tau");
         double delta = (Double) viewsDoc.get("delta");
 
-        System.out.printf("portopt demo - %d-asset universe, %d daily returns%n",
+        System.out.printf("portopt demo: %d-asset universe, %d daily returns%n",
                 names.size(), x.length);
         System.out.println("assets: " + String.join(", ", names));
 
@@ -146,7 +146,7 @@ public final class Demo {
         System.out.printf("RC spread: ERC %.2e, inv-vol %.2e%n", spread(rcErc), spread(rcIv));
 
         // ------------------------------------------------------------- backtest
-        rule("Quarterly-rebalance backtest, expanding window (holdout = last 750d)");
+        rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)");
         int[] fallbacks = {0};
         Map<String, Backtest.WeightFunction> methods = new LinkedHashMap<>();
         methods.put("equal_weight", h -> {

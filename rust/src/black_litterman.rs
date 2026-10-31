@@ -125,7 +125,9 @@ pub fn views_to_matrices(
     asset_names: &[String],
 ) -> Result<(Matrix, Vec<f64>, Vec<f64>)> {
     if asset_names.is_empty() {
-        return Err(PortOptError::InvalidInput("asset_names must be non-empty".into()));
+        return Err(PortOptError::InvalidInput(
+            "asset_names must be non-empty".into(),
+        ));
     }
     for i in 0..asset_names.len() {
         if asset_names[i + 1..].contains(&asset_names[i]) {
@@ -135,12 +137,15 @@ pub fn views_to_matrices(
         }
     }
     if views.is_empty() {
-        return Err(PortOptError::InvalidInput("views list must be non-empty".into()));
+        return Err(PortOptError::InvalidInput(
+            "views list must be non-empty".into(),
+        ));
     }
     let index_of = |name: &str| -> Result<usize> {
-        asset_names.iter().position(|a| a == name).ok_or_else(|| {
-            PortOptError::InvalidInput(format!("unknown asset in view: {name:?}"))
-        })
+        asset_names
+            .iter()
+            .position(|a| a == name)
+            .ok_or_else(|| PortOptError::InvalidInput(format!("unknown asset in view: {name:?}")))
     };
     let (k, n) = (views.len(), asset_names.len());
     let mut p = Matrix::zeros(k, n);
@@ -148,11 +153,20 @@ pub fn views_to_matrices(
     let mut conf = vec![1.0; k];
     for (i, view) in views.iter().enumerate() {
         let (qi, ci) = match view {
-            View::Absolute { asset, q, confidence } => {
+            View::Absolute {
+                asset,
+                q,
+                confidence,
+            } => {
                 p.set(i, index_of(asset)?, 1.0);
                 (*q, *confidence)
             }
-            View::Relative { long, short, q, confidence } => {
+            View::Relative {
+                long,
+                short,
+                q,
+                confidence,
+            } => {
                 let i_long = index_of(long)?;
                 let i_short = index_of(short)?;
                 if i_long == i_short {
@@ -166,7 +180,9 @@ pub fn views_to_matrices(
             }
         };
         if !qi.is_finite() {
-            return Err(PortOptError::InvalidInput(format!("view {i}: q must be finite")));
+            return Err(PortOptError::InvalidInput(format!(
+                "view {i}: q must be finite"
+            )));
         }
         if !ci.is_finite() || ci <= 0.0 {
             return Err(PortOptError::InvalidInput(format!(
@@ -251,6 +267,7 @@ fn p_tau_sigma(p: &Matrix, ts: &Matrix) -> Matrix {
 /// He-Litterman default view covariance scaled by a confidence divisor:
 /// `Omega = diag(P (tau Sigma) P')` with each diagonal entry divided by
 /// the corresponding per-view confidence `c_k > 0` (default 1).
+#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
 pub fn default_omega(
     sigma: &Matrix,
     p: &Matrix,
@@ -296,6 +313,7 @@ pub struct BlResult {
 /// # Errors
 /// Validation errors for shapes, tau, views, or confidences;
 /// [`PortOptError::NotPositiveDefinite`] if `A_k` is not SPD.
+#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
 pub fn bl_posterior(
     sigma: &Matrix,
     pi: &[f64],
@@ -372,7 +390,12 @@ pub fn bl_posterior(
             sigma_post.set(i, j, sigma.get(i, j) + v);
         }
     }
-    Ok(BlResult { mu_post, sigma_post, m, omega: om })
+    Ok(BlResult {
+        mu_post,
+        sigma_post,
+        m,
+        omega: om,
+    })
 }
 
 /// Posterior-based optimal weights.
@@ -382,6 +405,7 @@ pub fn bl_posterior(
 /// equilibrium *excess* returns, the pinned rate is `rf = 0` (a non-zero
 /// rf would double-count the risk-free rate); with no informative views
 /// the tangency on `(pi, Sigma)` recovers exactly `w_mkt`.
+#[allow(clippy::too_many_arguments)] // public signature mirrors the Python bl_weights keyword arguments
 pub fn bl_weights(
     sigma: &Matrix,
     pi: &[f64],
@@ -425,8 +449,17 @@ mod tests {
     fn views_to_matrices_builds_rows() {
         let names: Vec<String> = vec!["A".into(), "B".into()];
         let views = vec![
-            View::Absolute { asset: "B".into(), q: 0.1, confidence: 1.0 },
-            View::Relative { long: "A".into(), short: "B".into(), q: 0.02, confidence: 0.5 },
+            View::Absolute {
+                asset: "B".into(),
+                q: 0.1,
+                confidence: 1.0,
+            },
+            View::Relative {
+                long: "A".into(),
+                short: "B".into(),
+                q: 0.02,
+                confidence: 0.5,
+            },
         ];
         let (p, q, c) = views_to_matrices(&views, &names).unwrap();
         assert_eq!(p.row(0), &[0.0, 1.0]);
@@ -434,11 +467,24 @@ mod tests {
         assert_eq!(q, vec![0.1, 0.02]);
         assert_eq!(c, vec![1.0, 0.5]);
         assert!(views_to_matrices(&[], &names).is_err());
-        let bad = vec![View::Absolute { asset: "Z".into(), q: 0.1, confidence: 1.0 }];
+        let bad = vec![View::Absolute {
+            asset: "Z".into(),
+            q: 0.1,
+            confidence: 1.0,
+        }];
         assert!(views_to_matrices(&bad, &names).is_err());
-        let nan_q = vec![View::Absolute { asset: "A".into(), q: f64::NAN, confidence: 1.0 }];
+        let nan_q = vec![View::Absolute {
+            asset: "A".into(),
+            q: f64::NAN,
+            confidence: 1.0,
+        }];
         assert!(views_to_matrices(&nan_q, &names).is_err());
-        let same = vec![View::Relative { long: "A".into(), short: "A".into(), q: 0.02, confidence: 1.0 }];
+        let same = vec![View::Relative {
+            long: "A".into(),
+            short: "A".into(),
+            q: 0.02,
+            confidence: 1.0,
+        }];
         assert!(views_to_matrices(&same, &names).is_err());
         let dup: Vec<String> = vec!["A".into(), "B".into(), "A".into()];
         assert!(views_to_matrices(&views, &dup).is_err());

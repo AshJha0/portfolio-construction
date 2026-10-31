@@ -7,7 +7,7 @@ Deterministic: numpy default_rng(seed=42).  Writes
     market_caps.csv     market caps for the reverse-optimization weights
     views.json          example absolute + relative Black-Litterman views
     config.json         shared configuration constants
-    golden/golden.json  24 named cross-language golden cases
+    golden/golden.json  23 named cross-language golden cases
 
 Golden values are computed by the portopt reference implementation from
 the CSV *as written* (values are re-read from disk so that every language
@@ -18,6 +18,7 @@ active-set QP solutions against scipy SLSQP and their KKT certificates,
 ERC risk contributions equality, and the BL limits tau -> 0 and
 Omega -> inf.
 """
+
 from __future__ import annotations
 
 import json
@@ -76,9 +77,7 @@ VIEWS = [
 def generate_returns() -> np.ndarray:
     rng = np.random.default_rng(SEED)
     factors = rng.standard_normal((T_DAYS, 3)) * FACTOR_VOLS
-    idio = rng.standard_t(T_DOF, size=(T_DAYS, N)) * (
-        IDIO_VOLS / np.sqrt(T_DOF / (T_DOF - 2.0))
-    )
+    idio = rng.standard_t(T_DOF, size=(T_DAYS, N)) * (IDIO_VOLS / np.sqrt(T_DOF / (T_DOF - 2.0)))
     return MU_ANNUAL / 252.0 + factors @ LOADINGS.T + idio
 
 
@@ -96,7 +95,10 @@ def read_returns(path: str) -> np.ndarray:
 def case(name: str, inputs: dict, expect: dict, tol: float) -> dict:
     return {
         "name": name,
-        "inputs": {k: (float(v) if isinstance(v, (int, float, np.floating)) else v) for k, v in inputs.items()},
+        "inputs": {
+            k: (float(v) if isinstance(v, (int, float, np.floating)) else v)
+            for k, v in inputs.items()
+        },
         "expect": {k: float(v) for k, v in expect.items()},
         "tol": tol,
     }
@@ -115,7 +117,7 @@ def main() -> None:
 
     with open(os.path.join(_HERE, "market_caps.csv"), "w", newline="\n") as fh:
         fh.write("asset,market_cap\n")
-        for name, cap in zip(ASSETS, MARKET_CAPS):
+        for name, cap in zip(ASSETS, MARKET_CAPS, strict=True):
             fh.write(f"{name},{cap:.17g}\n")
 
     with open(os.path.join(_HERE, "views.json"), "w", newline="\n") as fh:
@@ -157,9 +159,15 @@ def main() -> None:
     qp_box = po.min_variance_longonly_solve(sig, lb=BOX_LB, ub=BOX_UB)
     qp_cf = po.constrained_frontier_solve(mu, sig, FRONTIER_TARGET)
     qp_cf_box = po.constrained_frontier_solve(mu, sig, BOX_TARGET, lb=BOX_LB, ub=BOX_UB)
-    for name, r in (("minvar_longonly", qp_lo), ("minvar_box", qp_box),
-                    ("frontier_constrained", qp_cf), ("frontier_constrained_box", qp_cf_box)):
-        assert r.converged and r.kkt_residual < 1e-12, f"{name}: QP not certified ({r.kkt_residual:.2e})"
+    for name, r in (
+        ("minvar_longonly", qp_lo),
+        ("minvar_box", qp_box),
+        ("frontier_constrained", qp_cf),
+        ("frontier_constrained_box", qp_cf_box),
+    ):
+        assert r.converged and r.kkt_residual < 1e-12, (
+            f"{name}: QP not certified ({r.kkt_residual:.2e})"
+        )
     w_mv_lo, w_box, w_cf, w_cf_box = qp_lo.weights, qp_box.weights, qp_cf.weights, qp_cf_box.weights
     low = po.cholesky(sig)
 
@@ -182,16 +190,24 @@ def main() -> None:
         if target is not None:
             cons.append({"type": "eq", "fun": lambda w: mu @ w - target})
         w0 = np.clip(np.full(N, 1.0 / N), lb, ub)
-        r = minimize(lambda w: 0.5 * w @ sig @ w, w0, jac=lambda w: sig @ w, method="SLSQP",
-                     bounds=[(lb, None if ub == np.inf else ub)] * N, constraints=cons,
-                     options={"ftol": 1e-16, "maxiter": 2000})
+        r = minimize(
+            lambda w: 0.5 * w @ sig @ w,
+            w0,
+            jac=lambda w: sig @ w,
+            method="SLSQP",
+            bounds=[(lb, None if ub == np.inf else ub)] * N,
+            constraints=cons,
+            options={"ftol": 1e-16, "maxiter": 2000},
+        )
         assert r.success, r.message
         return r.x
 
-    for name, w_qp, tgt, lb, ub in (("minvar_longonly", w_mv_lo, None, 0.0, np.inf),
-                                    ("minvar_box", w_box, None, BOX_LB, BOX_UB),
-                                    ("frontier_constrained", w_cf, FRONTIER_TARGET, 0.0, np.inf),
-                                    ("frontier_constrained_box", w_cf_box, BOX_TARGET, BOX_LB, BOX_UB)):
+    for name, w_qp, tgt, lb, ub in (
+        ("minvar_longonly", w_mv_lo, None, 0.0, np.inf),
+        ("minvar_box", w_box, None, BOX_LB, BOX_UB),
+        ("frontier_constrained", w_cf, FRONTIER_TARGET, 0.0, np.inf),
+        ("frontier_constrained_box", w_cf_box, BOX_TARGET, BOX_LB, BOX_UB),
+    ):
         w_ref = slsqp(tgt, lb, ub)
         assert w_qp @ sig @ w_qp <= w_ref @ sig @ w_ref + 1e-12, f"{name}: QP worse than SLSQP"
         assert np.max(np.abs(w_qp - w_ref)) < 1e-6, f"{name}: QP differs from SLSQP"
@@ -209,14 +225,17 @@ def main() -> None:
         rb = (np.sum(sample / np.outer(sqrtvar, sqrtvar)) - n) / (n * (n - 1))
         prior = rb * np.outer(sqrtvar, sqrtvar)
         np.fill_diagonal(prior, var)
-        y = zc ** 2
-        phi = ((y.T @ y) / t - 2 * (zc.T @ zc) * sample / t + sample ** 2).sum()
-        term1 = ((zc ** 3).T @ zc) / t
+        y = zc**2
+        phi = ((y.T @ y) / t - 2 * (zc.T @ zc) * sample / t + sample**2).sum()
+        term1 = ((zc**3).T @ zc) / t
         help_ = (zc.T @ zc) / t
-        theta = term1 - np.diag(help_)[:, None] * sample - help_ * var[:, None] + var[:, None] * sample
+        theta = (
+            term1 - np.diag(help_)[:, None] * sample - help_ * var[:, None] + var[:, None] * sample
+        )
         np.fill_diagonal(theta, 0.0)
-        rho = np.sum(np.diag((y.T @ y) / t - 2 * (zc.T @ zc) * sample / t + sample ** 2)) \
-            + rb * np.sum(np.outer(1 / sqrtvar, sqrtvar) * theta)
+        rho = np.sum(
+            np.diag((y.T @ y) / t - 2 * (zc.T @ zc) * sample / t + sample**2)
+        ) + rb * np.sum(np.outer(1 / sqrtvar, sqrtvar) * theta)
         gamma = np.linalg.norm(sample - prior, "fro") ** 2
         return max(0.0, min(1.0, (phi - rho) / gamma / t))
 
@@ -237,9 +256,7 @@ def main() -> None:
     # the posterior is tau-invariant, so the tau->0 limit is taken at FIXED Omega.
     bl_small_tau = po.bl_posterior(sig, pi, p_mat, q_vec, 1e-9, omega=omega)
     assert np.max(np.abs(bl_small_tau.mu_post - pi)) < 1e-8, "BL tau->0 limit"
-    bl_no_conf = po.bl_posterior(
-        sig, pi, p_mat, q_vec, TAU, omega=np.diag(np.full(2, 1e12))
-    )
+    bl_no_conf = po.bl_posterior(sig, pi, p_mat, q_vec, TAU, omega=np.diag(np.full(2, 1e12)))
     assert np.max(np.abs(bl_no_conf.mu_post - pi)) < 1e-10, "BL Omega->inf limit"
     print("validated: BL limits (tau->0, Omega->inf) return the prior")
 
@@ -248,7 +265,7 @@ def main() -> None:
     assert conv, "ERC CCD did not converge"
     rc = po.risk_contributions(w_erc, sig)
     assert np.max(rc) - np.min(rc) < 1e-9, "ERC risk contributions not equal"
-    print(f"validated: ERC RCs equal (spread {np.max(rc)-np.min(rc):.2e}, {sweeps} sweeps)")
+    print(f"validated: ERC RCs equal (spread {np.max(rc) - np.min(rc):.2e}, {sweeps} sweeps)")
     w_iv = po.inverse_vol_weights(sig)
     w_rb = po.risk_budget_weights(sig, RB_BUDGETS)
     rc_rb = po.risk_contributions(w_rb, sig)
@@ -419,12 +436,8 @@ def main() -> None:
             1e-12,
         )
     )
-    cases.append(
-        case("bl_posterior_returns", {"tau": TAU}, wdict("mu", bl.mu_post), 1e-10)
-    )
-    cases.append(
-        case("bl_posterior_weights", {"tau": TAU, "rf": 0.0}, wdict("w", w_bl), 1e-10)
-    )
+    cases.append(case("bl_posterior_returns", {"tau": TAU}, wdict("mu", bl.mu_post), 1e-10))
+    cases.append(case("bl_posterior_weights", {"tau": TAU, "rf": 0.0}, wdict("w", w_bl), 1e-10))
     cases.append(case("inverse_vol", {}, wdict("w", w_iv), 1e-12))
     cases.append(
         case(
@@ -482,7 +495,7 @@ def main() -> None:
         fh.write("\n")
 
     print(f"wrote {returns_path} ({T_DAYS} x {N})")
-    print(f"wrote market_caps.csv, views.json, config.json")
+    print("wrote market_caps.csv, views.json, config.json")
     print(f"wrote {golden_path} with {len(cases)} cases")
 
 

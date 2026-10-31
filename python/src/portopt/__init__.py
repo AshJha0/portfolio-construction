@@ -6,7 +6,24 @@ risk budgeting via CCD, and a quarterly expanding-window backtest.  Every
 numerical algorithm is pinned in the project's API_SPEC.md so that
 scipy-free ports in other languages reproduce the golden values.
 """
-from .linalg import cholesky, chol_solve, spd_solve, spd_inverse
+
+from .backtest import (
+    BacktestResult,
+    annualized_return,
+    annualized_vol,
+    max_drawdown,
+    rebalance_indices,
+    run_backtest,
+    sharpe_ratio,
+)
+from .black_litterman import (
+    BLResult,
+    bl_posterior,
+    bl_weights,
+    default_omega,
+    implied_equilibrium_returns,
+    views_to_matrices,
+)
 from .estimators import (
     ShrinkageResult,
     annualize_cov,
@@ -16,6 +33,7 @@ from .estimators import (
     shrink_covariance,
     validate_returns,
 )
+from .linalg import chol_solve, cholesky, spd_inverse, spd_solve
 from .markowitz import (
     QP_MAX_ITER,
     TANGENCY_COND_RTOL,
@@ -36,14 +54,6 @@ from .markowitz import (
     tangency_weights,
     two_fund_scalars,
 )
-from .black_litterman import (
-    BLResult,
-    bl_posterior,
-    bl_weights,
-    default_omega,
-    implied_equilibrium_returns,
-    views_to_matrices,
-)
 from .risk_parity import (
     erc_weights,
     inverse_vol_weights,
@@ -51,17 +61,8 @@ from .risk_parity import (
     risk_budget_weights,
     risk_contributions,
 )
-from .backtest import (
-    BacktestResult,
-    annualized_return,
-    annualized_vol,
-    max_drawdown,
-    rebalance_indices,
-    run_backtest,
-    sharpe_ratio,
-)
 
-__version__ = "2.0.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "cholesky",

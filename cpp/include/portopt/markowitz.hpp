@@ -24,7 +24,9 @@
 /// statement about the KKT conditions, not about an iterate step size.
 #pragma once
 
+#include <cstddef>
 #include <utility>
+#include <vector>
 
 #include "portopt/linalg.hpp"
 
@@ -129,8 +131,32 @@ struct QpResult {
   Vector weights;       ///< Feasible weights (bounds exact, equalities to rounding).
   int iterations;       ///< Dual active-set iterations (constraint adds/drops).
   bool converged;       ///< KKT certificate holds at `weights` (see kQpConvTol).
-  double kkt_residual;  ///< Largest KKT violation: equality residuals, bound violations, |S w - N u|.
+  double kkt_residual;  ///< Largest KKT violation: equality residuals, bound violations,
+                        ///< |S w - N u| and max(0, -min u_bound) (dual feasibility).
 };
+
+namespace detail {
+
+/// Result of kkt_certificate.
+struct KktCertificate {
+  bool certified;   ///< Primal, stationarity and dual feasibility all within tolerance.
+  double residual;  ///< Largest of the three violations.
+};
+
+/// KKT certificate of min 1/2 w'Sw s.t. n_c'w >= b_c (the first `meq`
+/// constraints are equalities) at `w`, with active set `active` and
+/// multipliers `u` (u[i] belongs to constraint active[i]). Checks primal
+/// feasibility (<= kQpConvTol * (1 + max|b|)), stationarity
+/// |S w - N u|_inf <= kQpConvTol * (1 + stat_scale) and dual feasibility
+/// u_i >= -kQpConvTol * (1 + stat_scale) for every active inequality, with
+/// stat_scale = |S w|_inf + sum_i |u_i| |n_i|_inf. Internal to the QP;
+/// exposed for testing.
+KktCertificate kkt_certificate(const Matrix& s, const std::vector<Vector>& normals,
+                               const Vector& rhs, std::size_t meq,
+                               const std::vector<std::size_t>& active, const Vector& u,
+                               const Vector& w);
+
+}  // namespace detail
 
 /// Constrained minimum variance min 1/2 w'Sw over {sum w = 1, lb <= w <= ub}
 /// (defaults: long-only, lb = 0, ub = +inf), solved by the pinned dual

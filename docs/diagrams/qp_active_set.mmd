@@ -1,0 +1,26 @@
+flowchart TD
+    S0["Input: Sigma (SPD), equality rows a_eq and b_eq, bounds lb and ub"] --> S1["Cholesky of Sigma once; constraint list:<br/>equalities and fixed coordinates first, then lower and finite upper bounds"]
+    S1 --> S2["w = 0 (unconstrained minimiser), active set empty"]
+    S2 --> P{"Equalities left to add?"}
+    P -- yes --> PE["p = next equality"]
+    P -- no --> PV{"Inequality violated by more than<br/>1e-13 (1 + abs b)?"}
+    PV -- none --> POL
+    PV -- found --> PI["p = most violated, ties to lowest index"]
+    PE --> DIR
+    PI --> DIR
+    DIR["Step directions z (primal) and r (dual)<br/>from Cholesky of Sigma and of Gram N' Sigma^-1 N"] --> T["t1 = largest step keeping inequality multipliers >= 0<br/>t2 = step that satisfies p"]
+    T --> TC{"t = min(t1, t2) finite?"}
+    TC -- "no, violation at most 1e-9" --> SKIP["skip p as degenerate"]
+    SKIP --> P
+    TC -- "no, larger violation" --> POL
+    TC -- "yes, t2 infinite" --> DUAL["dual step only, drop blocking constraint"]
+    DUAL --> DIR
+    TC -- "yes, t = t2" --> ADD["full step, add p to the active set"]
+    TC -- "yes, t = t1 below t2" --> DROP["partial step, drop blocking constraint"]
+    ADD --> IT{"iterations below 1000?"}
+    DROP --> IT
+    IT -- yes --> P
+    IT -- no --> POL
+    POL["Polish: Gram solve on the final active set, w = Sigma^-1 N u,<br/>one refinement step, active bounds set exactly"] --> CERT["Certificate: primal feasibility, stationarity<br/>and active bound multipliers, tolerance 1e-9"]
+    CERT --> CLIP["clip w to lb and ub"]
+    CLIP --> OUT["QpResult: weights, iterations, converged, kkt_residual"]

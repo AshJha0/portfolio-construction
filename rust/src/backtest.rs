@@ -56,6 +56,7 @@ fn validate_series(r: &[f64], min_len: usize) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0.0)` is deliberate: it rejects NaN as well as non-positive values
 fn validate_periods(periods: f64) -> Result<()> {
     if !(periods > 0.0) || !periods.is_finite() {
         return Err(PortOptError::InvalidInput(
@@ -148,7 +149,9 @@ pub fn rebalance_indices(t: usize, window: usize, step: usize) -> Result<Vec<usi
         ));
     }
     if step < 1 {
-        return Err(PortOptError::InvalidInput("rebalance step must be >= 1".into()));
+        return Err(PortOptError::InvalidInput(
+            "rebalance step must be >= 1".into(),
+        ));
     }
     if t <= window {
         return Err(PortOptError::InvalidInput(format!(
@@ -223,7 +226,9 @@ where
     let mut port = vec![0.0; t - window];
     for (idx, &t_k) in dates.iter().enumerate() {
         let history = Matrix::from_rows(
-            &(0..t_k).map(|r| returns.row(r).to_vec()).collect::<Vec<_>>(),
+            &(0..t_k)
+                .map(|r| returns.row(r).to_vec())
+                .collect::<Vec<_>>(),
         )?;
         let w = weight_fn(&history)?;
         if w.len() != n || !w.iter().all(|v| v.is_finite()) {

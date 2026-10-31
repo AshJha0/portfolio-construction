@@ -26,11 +26,12 @@ Every metric rejects NaN/inf, simple returns <= -1, non-positive
 ``periods`` and a non-finite ``rf``.  Sums over the series use
 ``math.fsum`` (correctly rounded), so the reference is BLAS-independent.
 """
+
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, List
 
 import numpy as np
 
@@ -80,7 +81,7 @@ def annualized_return(r: np.ndarray, periods: float = ANNUALIZATION) -> float:
     """Arithmetic annualized return ``periods * mean(r)``."""
     p = _validate_periods(periods)
     x = _validate_series(r, 1)
-    return p * math.fsum(x.tolist()) / x.shape[0]
+    return float(p * math.fsum(x.tolist()) / x.shape[0])
 
 
 def annualized_vol(r: np.ndarray, periods: float = ANNUALIZATION) -> float:
@@ -118,7 +119,7 @@ def max_drawdown(r: np.ndarray) -> float:
     return mdd
 
 
-def rebalance_indices(t: int, window: int = DEFAULT_WINDOW, step: int = DEFAULT_STEP) -> List[int]:
+def rebalance_indices(t: int, window: int = DEFAULT_WINDOW, step: int = DEFAULT_STEP) -> list[int]:
     """Pinned rebalance dates ``window, window+step, ...`` strictly below t.
 
     The number of dates is ``ceil((t - window) / step)``; any ``step >= 1``
@@ -131,9 +132,7 @@ def rebalance_indices(t: int, window: int = DEFAULT_WINDOW, step: int = DEFAULT_
     if step < 1:
         raise ValueError("rebalance step must be >= 1")
     if t <= window:
-        raise ValueError(
-            f"sample length {t} must exceed the estimation window {window}"
-        )
+        raise ValueError(f"sample length {t} must exceed the estimation window {window}")
     return list(range(window, t, step))
 
 
@@ -156,7 +155,7 @@ class BacktestResult:
     """
 
     portfolio_returns: np.ndarray
-    rebalance_dates: List[int]
+    rebalance_dates: list[int]
     weights: np.ndarray
     turnovers: np.ndarray
     ann_return: float

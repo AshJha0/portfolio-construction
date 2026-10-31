@@ -23,15 +23,17 @@ dogmatic view; c_k -> 0: view ignored).  This is *not* Idzorek's (2005)
 calibration, which solves for Omega such that the posterior tilt is a
 stated fraction of the full-confidence tilt.
 """
+
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence
+from typing import Any
 
 import numpy as np
 
-from .linalg import check_square_symmetric, cholesky, chol_solve
+from .linalg import check_square_symmetric, chol_solve, cholesky
 from .markowitz import tangency_weights
 
 __all__ = [
@@ -44,9 +46,7 @@ __all__ = [
 ]
 
 
-def implied_equilibrium_returns(
-    sigma: np.ndarray, w_mkt: np.ndarray, delta: float
-) -> np.ndarray:
+def implied_equilibrium_returns(sigma: np.ndarray, w_mkt: np.ndarray, delta: float) -> np.ndarray:
     """Reverse optimization: ``pi = delta * Sigma @ w_mkt``.
 
     ``w_mkt`` must be non-negative with positive sum; it is renormalized
@@ -55,9 +55,7 @@ def implied_equilibrium_returns(
     s = check_square_symmetric(sigma)
     w = np.asarray(w_mkt, dtype=float).reshape(-1)
     if w.shape[0] != s.shape[0]:
-        raise ValueError(
-            f"w_mkt length {w.shape[0]} does not match sigma dimension {s.shape[0]}"
-        )
+        raise ValueError(f"w_mkt length {w.shape[0]} does not match sigma dimension {s.shape[0]}")
     if not np.isfinite(w).all():
         raise ValueError("w_mkt contains NaN or infinite entries")
     if np.any(w < 0):
@@ -72,7 +70,7 @@ def implied_equilibrium_returns(
 
 
 def views_to_matrices(
-    views: Sequence[Mapping], asset_names: Sequence[str]
+    views: Sequence[Mapping[str, Any]], asset_names: Sequence[str]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build (P, Q, confidences) from a list of view dicts.
 
@@ -103,7 +101,7 @@ def views_to_matrices(
     q = np.zeros(k, dtype=float)
     conf = np.ones(k, dtype=float)
 
-    def index_of(view: Mapping, key: str, i: int) -> int:
+    def index_of(view: Mapping[str, Any], key: str, i: int) -> int:
         if key not in view:
             raise ValueError(f"view {i}: missing required key {key!r}")
         name = view[key]
@@ -119,9 +117,7 @@ def views_to_matrices(
             i_long = index_of(view, "long", i)
             i_short = index_of(view, "short", i)
             if i_long == i_short:
-                raise ValueError(
-                    f"view {i}: relative view: long and short legs must differ"
-                )
+                raise ValueError(f"view {i}: relative view: long and short legs must differ")
             p[i, i_long] = 1.0
             p[i, i_short] = -1.0
         else:
@@ -164,7 +160,7 @@ def default_omega(
     sigma: np.ndarray,
     p: np.ndarray,
     tau: float,
-    confidences: Optional[Sequence[float]] = None,
+    confidences: Sequence[float] | None = None,
 ) -> np.ndarray:
     """He-Litterman default view covariance scaled by a confidence divisor.
 
@@ -216,8 +212,8 @@ def bl_posterior(
     p: np.ndarray,
     q: np.ndarray,
     tau: float,
-    omega: Optional[np.ndarray] = None,
-    confidences: Optional[Sequence[float]] = None,
+    omega: np.ndarray | None = None,
+    confidences: Sequence[float] | None = None,
 ) -> BLResult:
     """Black-Litterman posterior via the pinned master formula.
 
@@ -273,8 +269,8 @@ def bl_weights(
     q: np.ndarray,
     tau: float,
     rf: float = 0.0,
-    omega: Optional[np.ndarray] = None,
-    confidences: Optional[Sequence[float]] = None,
+    omega: np.ndarray | None = None,
+    confidences: Sequence[float] | None = None,
 ) -> tuple[np.ndarray, BLResult]:
     """Posterior-based optimal weights.
 

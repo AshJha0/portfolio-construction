@@ -1,4 +1,5 @@
 """Tests for sample moments and Ledoit-Wolf shrinkage."""
+
 import numpy as np
 import pytest
 
@@ -7,9 +8,7 @@ import portopt as po
 
 def test_sample_moments_match_numpy(returns):
     assert np.allclose(po.sample_mean(returns), returns.mean(axis=0), atol=1e-15)
-    assert np.allclose(
-        po.sample_cov(returns), np.cov(returns, rowvar=False, ddof=1), atol=1e-15
-    )
+    assert np.allclose(po.sample_cov(returns), np.cov(returns, rowvar=False, ddof=1), atol=1e-15)
 
 
 def test_shrinkage_intensity_in_unit_interval(returns):

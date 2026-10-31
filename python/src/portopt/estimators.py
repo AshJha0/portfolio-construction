@@ -14,6 +14,7 @@ Reductions over the T-length sample use ``math.fsum`` (correctly rounded),
 so the reference values do not depend on the BLAS numpy is linked against;
 ports using plain sequential or compensated sums agree to ~1e-13 relative.
 """
+
 from __future__ import annotations
 
 import math
@@ -69,7 +70,8 @@ def sample_mean(returns: np.ndarray) -> np.ndarray:
 
 
 def _demeaned(x: np.ndarray) -> np.ndarray:
-    return x - sample_mean(x)
+    out: np.ndarray = x - sample_mean(x)
+    return out
 
 
 def _cov_from_demeaned(xc: np.ndarray) -> np.ndarray:

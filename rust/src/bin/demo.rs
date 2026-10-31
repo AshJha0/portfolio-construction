@@ -4,7 +4,7 @@
 //!
 //! Prints: estimator table, unconstrained + long-only frontier sweep,
 //! Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
-//! contributions, and a quarterly-rebalance comparison across six
+//! contributions, and a 63-day re-estimation backtest across six
 //! methods (mirrors `python/demo.py`).
 
 use std::path::{Path, PathBuf};
@@ -13,8 +13,24 @@ use std::process::ExitCode;
 use portopt as po;
 use portopt::{Matrix, PortOptError, View};
 
+/// Scientific notation with a sign and at least two exponent digits
+/// (`1.20e-01`), matching the Python, C++ and Java demos.
+fn sci(x: f64, prec: usize) -> String {
+    let s = format!("{x:.prec$e}");
+    match s.split_once('e') {
+        Some((mant, exp)) => {
+            let e: i32 = exp.parse().unwrap_or(0);
+            let sign = if e < 0 { '-' } else { '+' };
+            format!("{mant}e{sign}{:02}", e.abs())
+        }
+        None => s,
+    }
+}
+
 fn data_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("data")
 }
 
 fn rule(title: &str) {
@@ -39,7 +55,7 @@ fn run() -> po::Result<()> {
     let rf = cfg.risk_free_rate;
     let ann = cfg.annualization_factor;
 
-    println!("portopt demo — 8-asset universe, 1250 daily returns");
+    println!("portopt demo: 8-asset universe, 1250 daily returns");
     println!("assets: {}", names.join(", "));
 
     // ------------------------------------------------------------ estimators
@@ -52,7 +68,10 @@ fn run() -> po::Result<()> {
         "shrinkage intensity delta = {:.6}   rbar = {:.4}",
         shrink.intensity, shrink.rbar
     );
-    println!("{:<10}{:>9}{:>13}{:>13}", "asset", "mean", "vol(sample)", "vol(shrunk)");
+    println!(
+        "{:<10}{:>9}{:>13}{:>13}",
+        "asset", "mean", "vol(sample)", "vol(shrunk)"
+    );
     for (i, name) in names.iter().enumerate() {
         println!(
             "{:<10}{:>9.4}{:>13.4}{:>13.4}",
@@ -68,7 +87,10 @@ fn run() -> po::Result<()> {
     let sweep_u = po::efficient_frontier(&mu, &sig, cfg.frontier_points)?;
     let sweep_c = po::constrained_frontier(&mu, &sig, cfg.frontier_points, None, None)?;
     println!("unconstrained grid: A/C .. max(mu);  long-only grid: constrained GMV .. max(mu)");
-    println!("{:>8}{:>11}{:>10}{:>15}", "target", "vol uncon", "target", "vol long-only");
+    println!(
+        "{:>8}{:>11}{:>10}{:>15}",
+        "target", "vol uncon", "target", "vol long-only"
+    );
     for k in (0..sweep_u.targets.len()).step_by(4) {
         println!(
             "{:>8.4}{:>11.4}{:>10.4}{:>15.4}",
@@ -81,7 +103,10 @@ fn run() -> po::Result<()> {
     let gap = (0..sweep_c.targets.len())
         .map(|k| (po::linalg::dot(&mu, &sweep_c.weights[k]) - sweep_c.targets[k]).abs())
         .fold(0.0_f64, f64::max);
-    println!("long-only targets met exactly: max |mu'w - target| = {gap:.1e}");
+    println!(
+        "long-only targets met exactly: max |mu'w - target| = {}",
+        sci(gap, 1)
+    );
     let w_tan = po::tangency_weights(&mu, &sig, rf)?;
     let tan_ret = po::linalg::dot(&mu, &w_tan);
     let tan_vol = po::linalg::dot(&w_tan, &sig.matvec(&w_tan)).sqrt();
@@ -100,12 +125,24 @@ fn run() -> po::Result<()> {
     let (p, q, conf) = po::views_to_matrices(&views_doc.views, &names)?;
     for v in &views_doc.views {
         match v {
-            View::Absolute { asset, q, confidence } => {
-                println!("view: {asset} returns {:.1}% (confidence {confidence})", 100.0 * q);
-            }
-            View::Relative { long, short, q, confidence } => {
+            View::Absolute {
+                asset,
+                q,
+                confidence,
+            } => {
                 println!(
-                    "view: {long} beats {short} by {:.1}% (confidence {confidence})",
+                    "view: {asset} returns {:.1}% (confidence {confidence:?})",
+                    100.0 * q
+                );
+            }
+            View::Relative {
+                long,
+                short,
+                q,
+                confidence,
+            } => {
+                println!(
+                    "view: {long} beats {short} by {:.1}% (confidence {confidence:?})",
                     100.0 * q
                 );
             }
@@ -122,7 +159,10 @@ fn run() -> po::Result<()> {
     println!("{}", wrow("mu posterior", &res.mu_post));
     println!("{}", wrow("w market", &w_mkt));
     println!("{}", wrow("w posterior", &w_bl));
-    println!("posterior gross leverage = {:.4}", po::gross_leverage(&w_bl)?);
+    println!(
+        "posterior gross leverage = {:.4}",
+        po::gross_leverage(&w_bl)?
+    );
 
     // ----------------------------------------------------------- risk parity
     rule("Risk contributions: ERC vs inverse-vol");
@@ -140,13 +180,13 @@ fn run() -> po::Result<()> {
             - rc.iter().cloned().fold(f64::INFINITY, f64::min)
     };
     println!(
-        "RC spread: ERC {:.2e}, inv-vol {:.2e}",
-        spread(&rc_erc),
-        spread(&rc_iv)
+        "RC spread: ERC {}, inv-vol {}",
+        sci(spread(&rc_erc), 2),
+        sci(spread(&rc_iv), 2)
     );
 
     // -------------------------------------------------------------- backtest
-    rule("Quarterly-rebalance backtest, expanding window (holdout = last 750d)");
+    rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)");
     let mut fallbacks = 0usize;
     let window = cfg.estimation_window;
     let step = cfg.rebalance_step;

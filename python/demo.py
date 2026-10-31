@@ -4,8 +4,9 @@ Run:  cd python && PYTHONPATH=src python3 demo.py
 
 Prints: estimator table, unconstrained + long-only frontier sweep,
 Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
-contributions, and a quarterly-rebalance comparison across six methods.
+contributions, and a 63-day re-estimation backtest across six methods.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,12 +38,10 @@ def main() -> int:
         cfg = json.load(fh)
     with open(os.path.join(DATA, "views.json")) as fh:
         views_doc = json.load(fh)
-    caps = np.loadtxt(
-        os.path.join(DATA, "market_caps.csv"), delimiter=",", skiprows=1, usecols=1
-    )
+    caps = np.loadtxt(os.path.join(DATA, "market_caps.csv"), delimiter=",", skiprows=1, usecols=1)
     rf = cfg["risk_free_rate"]
 
-    print("portopt demo — 8-asset universe, 1250 daily returns")
+    print("portopt demo: 8-asset universe, 1250 daily returns")
     print(f"assets: {', '.join(names)}")
 
     # ------------------------------------------------------------- estimators
@@ -54,10 +53,7 @@ def main() -> int:
     print(f"shrinkage intensity delta = {shrink.intensity:.6f}   rbar = {shrink.rbar:.4f}")
     print(f"{'asset':<10}{'mean':>9}{'vol(sample)':>13}{'vol(shrunk)':>13}")
     for i, name in enumerate(names):
-        print(
-            f"{name:<10}{mu[i]:>9.4f}{np.sqrt(sig[i, i]):>13.4f}"
-            f"{np.sqrt(sig_sh[i, i]):>13.4f}"
-        )
+        print(f"{name:<10}{mu[i]:>9.4f}{np.sqrt(sig[i, i]):>13.4f}{np.sqrt(sig_sh[i, i]):>13.4f}")
 
     # --------------------------------------------------------------- frontier
     rule("Efficient frontier sweeps (25 points each, showing every 4th)")
@@ -70,7 +66,9 @@ def main() -> int:
             f"{targets[k]:>8.4f}{np.sqrt(var_u[k]):>11.4f}"
             f"{targets_c[k]:>10.4f}{np.sqrt(var_c[k]):>15.4f}"
         )
-    print(f"long-only targets met exactly: max |mu'w - target| = {np.max(np.abs(w_c @ mu - targets_c)):.1e}")
+    print(
+        f"long-only targets met exactly: max |mu'w - target| = {np.max(np.abs(w_c @ mu - targets_c)):.1e}"
+    )
     w_tan = po.tangency_weights(mu, sig, rf)
     print(
         f"tangency (rf={rf:.2%}): sharpe = "
@@ -116,7 +114,7 @@ def main() -> int:
     )
 
     # ---------------------------------------------------------------- backtest
-    rule("Quarterly-rebalance backtest, expanding window (holdout = last 750d)")
+    rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)")
 
     fallbacks = {"n": 0}
 
@@ -140,18 +138,13 @@ def main() -> int:
 
     methods = {
         "equal_weight": lambda h: np.full(h.shape[1], 1.0 / h.shape[1]),
-        "min_var_lo": lambda h: po.min_variance_longonly(
-            po.annualize_cov(po.sample_cov(h))
-        ),
+        "min_var_lo": lambda h: po.min_variance_longonly(po.annualize_cov(po.sample_cov(h))),
         "tangency": tangency_fn,
         "black_litt": bl_fn,
         "erc": lambda h: po.erc_weights(po.sample_cov(h)),
         "inverse_vol": lambda h: po.inverse_vol_weights(po.sample_cov(h)),
     }
-    print(
-        f"{'method':<14}{'ann ret':>9}{'ann vol':>9}{'sharpe':>9}"
-        f"{'max DD':>9}{'avg turno':>11}"
-    )
+    print(f"{'method':<14}{'ann ret':>9}{'ann vol':>9}{'sharpe':>9}{'max DD':>9}{'avg turno':>11}")
     for name, fn in methods.items():
         r = po.run_backtest(
             x, fn, rf=rf, window=cfg["estimation_window"], step=cfg["rebalance_step"]

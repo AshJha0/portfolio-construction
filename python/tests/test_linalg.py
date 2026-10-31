@@ -1,4 +1,5 @@
 """Tests for the pinned linear algebra kernels."""
+
 import numpy as np
 import pytest
 

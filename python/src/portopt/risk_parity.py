@@ -24,12 +24,16 @@ Sweep order pinned: coordinates i = 0, 1, ..., n-1 in ascending order;
 after each single-coordinate update the cached product ``Sigma y`` is
 updated before the next coordinate.  Convergence: after a full sweep,
 ``max_i |y_i - y_i_prev_sweep| < tol`` (default 1e-10); at most 10000
-sweeps (non-convergence is reported via a flag, not an exception).
+sweeps.  :func:`risk_budget_solve` reports non-convergence via a flag; the
+weights-only wrappers :func:`risk_budget_weights` and :func:`erc_weights`
+raise ValueError when the sweep cap is hit (the same convention as the
+weights-only QP wrappers in :mod:`portopt.markowitz`).
 """
+
 from __future__ import annotations
 
 import math
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -65,7 +69,8 @@ def risk_contributions(w: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     var = float(wv @ sw)
     if var <= 0.0:
         raise ValueError("portfolio variance must be strictly positive")
-    return wv * sw / var
+    rc: np.ndarray = wv * sw / var
+    return rc
 
 
 def inverse_vol_weights(sigma: np.ndarray) -> np.ndarray:
@@ -78,7 +83,7 @@ def inverse_vol_weights(sigma: np.ndarray) -> np.ndarray:
     return inv / float(np.sum(inv))
 
 
-def _validate_budgets(budgets: Optional[Sequence[float]], n: int) -> np.ndarray:
+def _validate_budgets(budgets: Sequence[float] | None, n: int) -> np.ndarray:
     if budgets is None:
         return np.full(n, 1.0 / n)
     b = np.asarray(budgets, dtype=float).reshape(-1)
@@ -91,7 +96,7 @@ def _validate_budgets(budgets: Optional[Sequence[float]], n: int) -> np.ndarray:
 
 def risk_budget_solve(
     sigma: np.ndarray,
-    budgets: Optional[Sequence[float]] = None,
+    budgets: Sequence[float] | None = None,
     tol: float = CCD_TOL,
     max_sweeps: int = CCD_MAX_SWEEPS,
 ) -> tuple[np.ndarray, int, bool]:
@@ -136,9 +141,7 @@ def risk_budget_solve(
         y_prev = y.copy()
         for i in range(n):
             m_i = sy[i] - s[i, i] * y[i]
-            y_new = (-m_i + math.sqrt(m_i * m_i + 4.0 * s[i, i] * b[i])) / (
-                2.0 * s[i, i]
-            )
+            y_new = (-m_i + math.sqrt(m_i * m_i + 4.0 * s[i, i] * b[i])) / (2.0 * s[i, i])
             dy = y_new - y[i]
             if dy != 0.0:
                 sy = sy + s[:, i] * dy
@@ -150,17 +153,31 @@ def risk_budget_solve(
 
 def risk_budget_weights(
     sigma: np.ndarray,
-    budgets: Optional[Sequence[float]] = None,
+    budgets: Sequence[float] | None = None,
     tol: float = CCD_TOL,
     max_sweeps: int = CCD_MAX_SWEEPS,
 ) -> np.ndarray:
-    """Risk-budget weights (weights only; see :func:`risk_budget_solve`)."""
-    w, _, _ = risk_budget_solve(sigma, budgets, tol=tol, max_sweeps=max_sweeps)
+    """Risk-budget weights (weights only; see :func:`risk_budget_solve`).
+
+    Raises ValueError if the CCD hits the sweep cap before the sweep-level
+    step falls below ``tol``; use :func:`risk_budget_solve` to inspect the
+    unconverged iterate.
+    """
+    w, sweeps, converged = risk_budget_solve(sigma, budgets, tol=tol, max_sweeps=max_sweeps)
+    if not converged:
+        raise ValueError(
+            f"risk_budget_weights: CCD did not converge within {sweeps} sweeps "
+            f"(tol {tol:.3e}); use risk_budget_solve to inspect the iterate"
+        )
     return w
 
 
 def erc_weights(
     sigma: np.ndarray, tol: float = CCD_TOL, max_sweeps: int = CCD_MAX_SWEEPS
 ) -> np.ndarray:
-    """Equal-risk-contribution weights (equal budgets b_i = 1/n)."""
+    """Equal-risk-contribution weights (equal budgets b_i = 1/n).
+
+    Raises ValueError if the CCD hits the sweep cap (see
+    :func:`risk_budget_weights`).
+    """
     return risk_budget_weights(sigma, None, tol=tol, max_sweeps=max_sweeps)

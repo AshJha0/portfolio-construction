@@ -4,48 +4,51 @@ classDiagram
         +chol_solve(L, b) x
         +spd_solve(A, b) x
         +spd_inverse(A) Ainv
-        +check_square_symmetric(A)
+        +check_square_symmetric(A) A
         PIVOT_RTOL = 1e-13
     }
     class estimators {
-        +validate_returns(X)
+        +validate_returns(X) X
         +sample_mean(X) mu
         +sample_cov(X) S
         +shrink_covariance(X) ShrinkageResult
-        +annualize_mean(mu, 252)
-        +annualize_cov(S, 252)
+        +annualize_mean(mu, periods) mu
+        +annualize_cov(S, periods) S
     }
     class markowitz {
         +two_fund_scalars(mu, S) TwoFundScalars
         +min_variance_weights(S) w
         +tangency_weights(mu, S, rf) w
-        +gross_leverage(w)
+        +gross_leverage(w) float
         +frontier_weights(mu, S, m) w
-        +efficient_frontier(mu, S, 25)
+        +efficient_frontier(mu, S, n_points) tuple
         +project_simplex_box(v, total, lb, ub) w
-        +attainable_return_range(mu, lb, ub)
+        +attainable_return_range(mu, lb, ub) tuple
         +min_variance_longonly_solve(S, lb, ub) QpResult
         +constrained_frontier_solve(mu, S, m, lb, ub) QpResult
-        +constrained_frontier(mu, S, 25, lb, ub)
+        +constrained_frontier(mu, S, n_points, lb, ub) tuple
     }
     class black_litterman {
         +implied_equilibrium_returns(S, w_mkt, delta) pi
-        +views_to_matrices(views, names) P,Q,conf
+        +views_to_matrices(views, names) tuple
         +default_omega(S, P, tau, conf) Omega
-        +bl_posterior(S, pi, P, Q, tau, Omega) BLResult
-        +bl_weights(...) w, BLResult
+        +bl_posterior(S, pi, P, Q, tau, Omega, conf) BLResult
+        +bl_weights(S, pi, P, Q, tau, rf, Omega, conf) tuple
     }
     class risk_parity {
         +risk_contributions(w, S) rc
-        +risk_budget_solve(S, b) w,sweeps,flag
+        +risk_budget_solve(S, b, tol, max_sweeps) tuple
+        +risk_budget_weights(S, b) w
         +erc_weights(S) w
         +inverse_vol_weights(S) w
     }
     class backtest {
-        +rebalance_indices(T, 500, 63)
-        +run_backtest(X, weight_fn, rf) BacktestResult
-        +sharpe_ratio(r, rf)
-        +max_drawdown(r)
+        +rebalance_indices(T, window, step) list
+        +run_backtest(X, weight_fn, rf, window, step) BacktestResult
+        +annualized_return(r) float
+        +annualized_vol(r) float
+        +sharpe_ratio(r, rf) float
+        +max_drawdown(r) float
     }
     class TwoFundScalars {
         a
@@ -63,6 +66,7 @@ classDiagram
         sigma
         intensity
         rbar
+        sample
         target
     }
     class BLResult {
@@ -72,6 +76,8 @@ classDiagram
         omega
     }
     class BacktestResult {
+        portfolio_returns
+        rebalance_dates
         weights
         turnovers
         ann_return
