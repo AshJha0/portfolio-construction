@@ -60,7 +60,7 @@ they changed. With no rule files it stops with a notice.
 | `study_id` | A study registered in `data/real/registry.json` (the runner reads post-2016 data, which needs one) |
 | `frozen_at` | `YYYY-MM-DD`. The first logged month is the first calendar month starting on or after this date |
 | `git_tag` | The tag that pins the code the rule was frozen with |
-| `strategy` | `name` one of `equal_weight`, `inverse_vol`, `erc`, `min_variance_longonly`, `max_sharpe_longonly`, `tangency_capped` (from `portopt.research.strategies`); `params` are that factory's keyword arguments, checked at load time |
+| `strategy` | `name` one of `equal_weight`, `inverse_vol`, `erc`, `min_variance_longonly`, `max_sharpe_longonly`, `tangency_capped` (from `portopt.research.strategies`), or `min_variance_longonly_with`, `erc_with`, `max_sharpe_bayes_stein` (from `portopt.research.strategies_v2`; the covariance estimator is named in `params` as `"estimator"`: one of `sample`, `lwcc`, `lwid`, `nls`, `ewma` and `ewmacc` (both with `half_life`), `pca` (with `k`)); `params` are checked at load time (`forward/run_forward.py`, `STRATEGIES` and `ESTIMATORS`) |
 | `dataset` | `ind10_vw_daily` or `ind49_vw_daily` |
 | `rf_dataset` | Optional, `ff3_daily` (the only one with an RF column) |
 | `lookback_days` | Integer >= 21: the estimation window, trailing trading days before each rebalance |

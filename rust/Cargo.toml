@@ -1,6 +1,6 @@
 [package]
 name = "portopt"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 rust-version = "1.78"
 description = "Portfolio construction: Markowitz, Black-Litterman, risk parity (portfolio-construction reference port)"

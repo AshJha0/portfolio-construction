@@ -20,7 +20,8 @@ pub enum PortOptError {
     /// not attainable, zero-vol Sharpe, non-certified QP, ...).
     Undefined(String),
     /// The tangency portfolio is undefined (`A - rf*C <= 0`) or
-    /// ill-conditioned (`A - rf*C` within a relative 1e-6 of cancelling).
+    /// ill-conditioned (gross leverage of the weights above `max_leverage`,
+    /// default `TANGENCY_MAX_LEVERAGE = 10`; API_SPEC 3.3).
     /// Distinct so the pinned backtest fallback can match exactly this case.
     TangencyUndefined(String),
     /// Infeasible constraint set for the box-simplex projection.

@@ -11,7 +11,7 @@
 # Tests run with the working directory set to this source dir so the
 # golden file resolves at ../data/golden/golden.json (per the contract).
 cmake_minimum_required(VERSION 3.25)
-project(portopt VERSION 1.2.0 LANGUAGES CXX)
+project(portopt VERSION 1.3.0 LANGUAGES CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)

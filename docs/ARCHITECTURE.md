@@ -1,4 +1,4 @@
-# ARCHITECTURE: portopt 1.2.0
+# ARCHITECTURE: portopt 1.3.0
 
 Design notes for the four parallel implementations: the Python
 reference (`python/src/portopt`), the C++26 library (`portopt::`, in
@@ -8,8 +8,9 @@ reference (`python/src/portopt`), the C++26 library (`portopt::`, in
 level. This document explains why the pieces are shaped the way they are;
 [LEARN.md](../LEARN.md) explains the mathematics.
 
-All four implementations are at version 1.2.0 (`python/pyproject.toml`,
-`cpp/CMakeLists.txt`, `rust/Cargo.toml`, `java/pom.xml`). The bundled
+This document describes release 1.3.0; the version numbers live in
+`python/pyproject.toml`, `cpp/CMakeLists.txt`, `rust/Cargo.toml` and
+`java/pom.xml`. The bundled
 data is synthetic (`data/generate_data.py`, seed 42); performance and
 accuracy figures below describe the code on that data.
 
@@ -23,7 +24,8 @@ accuracy figures below describe the code on that data.
 | `black_litterman` | Reverse optimisation, view parsing and validation, default Omega, posterior master formula, posterior tangency | `linalg`, `markowitz` |
 | `risk_parity` | Risk contributions, CCD risk budgeting and ERC, inverse volatility | `linalg` |
 | `backtest` | Pinned rebalance schedule, portfolio return accounting, metrics, target turnover | `estimators` (validation) |
-| `research` (Python only) | Net-of-cost backtest on drifted weights, no-trade band, partial rebalance, volatility targeting; Sharpe standard error, probabilistic and deflated Sharpe, block bootstrap | the modules above |
+| `research` (Python only) | `costs`: net-of-cost backtest on drifted weights, band, partial rebalance, volatility targeting with a chosen estimator; `stats`: Sharpe standard errors, PSR, DSR, bootstrap, paired test; `estimators`: EWMA, Ledoit-Wolf identity, nonlinear shrinkage, PCA factors, Bayes-Stein and James-Stein means; `strategies`, `strategies_v2`: weight rules and covariance-estimator objects; `data`: real-data loader with vintages and the holdout gate; `walkforward`: trial registry and calendar walk-forward | the modules above |
+| `forward/run_forward.py` (outside the package) | Monthly paper log of frozen rule files against new data | `research` |
 | `demo` | End-to-end report on the bundled data | all pinned modules |
 
 The pinned modules form a strict DAG with `linalg` at the root of every
@@ -34,14 +36,64 @@ set of reductions, and the SPD gate belongs to the consumer of the
 covariance (every optimiser calls `cholesky` first).
 
 **The research layer.** `python/src/portopt/research/` is a Python-only
-layer for studies that the pinned contract does not cover: a backtest
-that charges costs on drifted holdings, rebalancing rules (no-trade band,
-partial rebalance, volatility targeting), and the statistics needed to
-read a backtest (Lo 2002 Sharpe standard error, probabilistic and
-deflated Sharpe ratios, block bootstrap). It is outside API_SPEC and
-`golden.json`, has no C++, Rust or Java counterpart, and may change
-between minor versions. Its study results are written up in
-[`docs/results/cost_aware_allocation.md`](results/cost_aware_allocation.md).
+layer for studies that the pinned contract does not cover. It is outside
+API_SPEC and `golden.json`, has no C++, Rust or Java counterpart, and may
+change between minor versions [derived: `research/__init__.py`]. Its
+modules are listed in the table above. Results:
+[`cost_aware_allocation.md`](results/cost_aware_allocation.md) (synthetic),
+[`real_data_study_dev.md`](results/real_data_study_dev.md) (development),
+[`real_data_study.md`](results/real_data_study.md) (holdout).
+
+**Real data, registry and holdout.** Daily industry portfolios and
+factors from the Kenneth French Data Library are downloaded at run time
+by `scripts/fetch_data.py` into the git-ignored `data/real/raw/`. Each
+download is recorded as a vintage in `data/real/manifest.json` with the
+SHA-256 of the zip and of the parsed arrays, and `load_returns` refuses
+data that does not hash to a recorded vintage. Every configuration is
+entered in `data/real/registry.json` before it runs, so the trial count
+used by the deflated Sharpe ratio is the count of what was actually
+tried. Rows from 2016-01-01 on are the holdout: `load_returns` raises
+`HoldoutAccessError` for them unless `study_id` names a registered study
+[derived: `research/data.py`; `data/real/README.md`]. Source:
+`diagrams/real_data_holdout.mmd`.
+
+```mermaid
+flowchart TD
+    FR["Kenneth French Data Library (zip files)"] -->|"scripts/fetch_data.py, at run time"| RAW["data/real/raw/ (git-ignored)"]
+    RAW --> MAN["data/real/manifest.json: zip and parsed SHA-256 per vintage"]
+    REG["data/real/registry.json: studies and configurations, registered before running"] --> LR
+    MAN --> LR["research.data.load_returns(dataset, period, study_id)"]
+    RAW --> LR
+    LR -->|"period = development (before 2016-01-01)"| DEV["python/studies/real_data_study.py --phase dev"]
+    LR -->|"period = holdout, only with a registered study_id"| HO["phase 2: run once on r2-holdout-v1"]
+    LR -->|"holdout without study_id"| ERR["HoldoutAccessError"]
+    DEV --> DEVR["docs/results/real_data_study_dev.md"]
+    DEVR --> PRE["docs/results/real_data_preregistration.md: H1-H6, Holm, frozen forward rules"]
+    PRE --> HO
+    HO --> HOR["docs/results/real_data_study.md"]
+```
+
+**The forward ledger job.** `forward/rules/*.json` holds rule files
+frozen at registration (study `r2-forward-v1`). Once a month the
+workflow `.github/workflows/forward.yml` fetches the latest vintage and
+runs `forward/run_forward.py`, which validates each rule against its
+schema and the `STRATEGIES` table, computes weights only from data
+before the month, and appends any newly completed month to
+`forward/ledger.csv`. It commits only the ledger, `forward/results.md`
+and the manifest [derived: `forward.yml`; `forward/README.md`]. Source:
+`diagrams/forward_ledger.mmd`.
+
+```mermaid
+flowchart TD
+    CRON[".github/workflows/forward.yml: cron 06:00 UTC on the 8th, or manual"] --> RULES{"forward/rules/*.json present?"}
+    RULES -->|no| STOP["exit, nothing to log"]
+    RULES -->|yes| FETCH["python scripts/fetch_data.py: new vintage recorded in manifest.json"]
+    FETCH --> RUN["python forward/run_forward.py: validate each rule against its schema and STRATEGIES; weights from data before the month"]
+    RUN --> NEW{"new complete month?"}
+    NEW -->|no| STOP2["no change"]
+    NEW -->|yes| APP["append rows to forward/ledger.csv; rewrite forward/results.md"]
+    APP --> COMMIT["commit ledger.csv, results.md, manifest.json only"]
+```
 
 ## 2. Data flow
 
@@ -74,7 +126,7 @@ flowchart TD
 
     BT["backtest: t_k = 500 + 63k,<br/>expanding window, L1 target turnover"]
     RES["research (Python only, outside the contract)<br/>net-of-cost backtest, Sharpe statistics"]
-    OUTG["golden.json (23 cases)"]
+    OUTG["golden.json (26 cases)"]
     OUTD["demo report"]
 
     RET --> MU
@@ -400,6 +452,30 @@ identity `port_t = w_k' r_t` testable. The cost of that convention is
 that the daily constant-mix trades are invisible (LEARN 7.3 measures
 them; the research layer charges them).
 
+### Tangency leverage cap and the cost-aware QP (1.3.0)
+
+**Tangency.** `tangency_weights` raises `TangencyUndefinedError` when
+`A - rf*C <= 0` or when the gross leverage of the result exceeds
+`max_leverage` (default `TANGENCY_MAX_LEVERAGE = 10`). The 1.2.0 rule
+tested a relative 1e-6 cancellation of `A - rf*C` and accepted 93.6x
+gross leverage on the bundled backtest. Testing leverage directly is
+dimensionless and subsumes the old test [derived: API_SPEC 3.3]. Every
+port implements it; Rust adds `tangency_weights_capped`.
+
+**Turnover QP.** `min_variance_turnover[_solve]` and
+`mean_variance_turnover[_solve]` minimise variance (or mean-variance)
+plus `kappa * sum|w - w0|`, with an optional turnover cap. The trade is
+split as `w = w0 + b - s`, `b, s >= 0`, which gives a 3n-variable QP
+that the existing dual active-set solver handles once a proximal term
+with `eps = 0.5 / trace(Sigma^-1)` makes it strictly convex without
+changing the minimiser. The result is certified against the KKT
+conditions of the original nonsmooth problem (L1 subgradient, cap
+multiplier, bounds) [derived: API_SPEC 3.7]. Three golden cases pin it:
+`minvar_turnover_l1`, `minvar_turnover_capped`, `meanvar_turnover_box`.
+At n = 49 the split problem took about 600 s per solve in the Python
+reference, which is why the real-data study ran it on 10 industries
+only [measured: `docs/results/real_data_study_dev.md`].
+
 ## 5. Error handling and convergence reporting
 
 ### 5.1 Policy
@@ -459,7 +535,7 @@ full condition table):
 
 ### 6.1 Golden cases and their tolerances
 
-`data/golden/golden.json` holds 23 cases in a flat
+`data/golden/golden.json` holds 26 cases in a flat
 name / inputs / expect / tol schema, read by numpy-free parsers in each
 port; every suite asserts the case count. Each value is checked with an
 absolute tolerance, `abs(got - expect) <= tol`
@@ -494,7 +570,7 @@ flowchart TD
     V2 --> GJ
     V3 --> GJ
     V4 --> GJ
-    GJ["golden.json: 23 cases, name, inputs, expect, tol"]
+    GJ["golden.json: 26 cases, name, inputs, expect, tol"]
     GJ --> T1["Python: python/tests/test_golden.py"]
     GJ --> T2["C++: cpp/tests/test_golden.cpp"]
     GJ --> T3["Rust: rust/tests/golden.rs"]
@@ -626,14 +702,20 @@ dense throughout.
 * **CCD** costs O(n^2) per sweep thanks to the incremental `Sigma y`
   cache; it takes 14 sweeps on the annualised bundled covariance.
 
-Measured on the Python reference by the 2026-10-31 review (Windows 11,
-single run): the QP takes about 0.99 s and Ledoit-Wolf about 1.77 s at
-n = 100. That is adequate for a reference at n <= 20 and unsuitable above
-roughly 50 assets. The full Python suite of 117 tests ran in about 2.4 s
-on the same machine for this revision. No benchmark harness exists yet. The planned work
-(incremental QR updates of the active set instead of refactoring the Gram
-matrix, bounds stored as indices, preallocated workspaces, vectorised
-Ledoit-Wolf sums) is listed in section 5 of the review.
+Kernel benchmarks in all four languages are in
+[`docs/results/benchmarks.md`](results/benchmarks.md), with the harnesses
+`python/benchmarks/bench_kernels.py`, `cpp/benchmarks/bench_kernels.cpp`
+(opt-in, `PORTOPT_BUILD_BENCHMARKS`), `rust/benches/kernels.rs` and the
+Java `bench` Maven profile; CI builds and smoke-runs each. On one
+non-idle laptop the long-only QP took 460 us at n = 8 and 830 ms at
+n = 50 in Python, against about 8 us and 2.9 to 5.7 ms in the ports
+[measured]. In 1.3.0 the default Python `shrink_covariance` evaluates
+its sums on numpy tiles (2.4x to 22x faster than the loop reference,
+agreeing to 1e-13 relative), and the C++ backtest hands the weight
+function a non-owning `HistoryView` instead of a copy. The QP still
+refactors its working set each iteration; incremental updates remain
+open. The Python suite has 349 tests at this revision
+(`pytest --collect-only`).
 
 ## 9. Thread safety
 
@@ -657,8 +739,8 @@ exercises concurrent use.
 
 The Mermaid sources live in [`diagrams/`](diagrams/): `dataflow.mmd`,
 `modules.mmd`, `backtest_sequence.mmd`, `qp_active_set.mmd`,
-`risk_parity_ccd.mmd`, `black_litterman_flow.mmd`, `golden_parity.mmd`
-and `ci_pipeline.mmd`. The `.mmd` files are the sources; this document
+`risk_parity_ccd.mmd`, `black_litterman_flow.mmd`, `golden_parity.mmd`,
+`ci_pipeline.mmd`, `real_data_holdout.mmd` and `forward_ledger.mmd`. The `.mmd` files are the sources; this document
 carries inline copies in `mermaid` code blocks, which GitHub renders. No
 automated check renders or validates them, so edit the `.mmd` file and
 the inline copy together.

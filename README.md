@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/AshJha0/portfolio-construction/actions/workflows/ci.yml/badge.svg)](https://github.com/AshJha0/portfolio-construction/actions/workflows/ci.yml)
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
-[![Version 1.2.0](https://img.shields.io/badge/version-1.2.0-informational.svg)](CHANGELOG.md)
+[![Version 1.3.0](https://img.shields.io/badge/version-1.3.0-informational.svg)](CHANGELOG.md)
 
 Markowitz, Black-Litterman and risk parity, written four times: a Python
 reference and ports in C++26, Rust and Java 25.
@@ -22,7 +22,7 @@ We wrote it for two readers. A student can run one command per language,
 read the code next to the guide, and see every number in this page
 reproduced. A reviewer can check that the four implementations agree: every
 algorithm is pinned step by step in [API_SPEC.md](API_SPEC.md), and all four
-test suites check the same 23 golden cases in `data/golden/golden.json`.
+test suites check the same 26 golden cases in `data/golden/golden.json`.
 The Python library depends only on numpy, and the ports call no numerical
 library at all (no BLAS, LAPACK or solver); the Rust crate's only
 dependencies are serde and serde_json, for reading the data files.
@@ -81,7 +81,7 @@ cd portfolio-construction
 
 ```bash
 python -m pip install -e "python[dev]"   # numpy; pytest, scipy, ruff, mypy for development
-pytest -q python                         # 114 tests, including the golden suite
+pytest -q python                         # 349 tests at 1.3.0, including the golden suite
 python python/demo.py                    # end-to-end demo
 ```
 
@@ -143,6 +143,8 @@ Python names; the ports use the same names in each language's casing
 | Black-Litterman | `implied_equilibrium_returns`, `views_to_matrices`, `default_omega`, `bl_posterior`, `bl_weights` | reverse optimisation; absolute and relative views; He-Litterman Omega scaled by per-view confidence; one k-by-k Cholesky solve |
 | Risk parity | `risk_contributions`, `erc_weights`, `risk_budget_solve`, `risk_budget_weights`, `inverse_vol_weights` | cyclical coordinate descent on Spinu's log-barrier form, tol 1e-10, at most 10,000 sweeps |
 | Backtest | `rebalance_indices`, `run_backtest`, `annualized_return`, `annualized_vol`, `sharpe_ratio`, `max_drawdown` | expanding window 500 rows, re-estimate every 63 rows, L1 turnover between target vectors |
+| Research layer (Python only, not pinned) | `portopt.research`: `run_backtest_net`, `run_schedule_net`, `walk_forward`; `ewma_covariance`, `ledoit_wolf_identity`, `nonlinear_shrinkage`, `pca_factor_covariance`, `bayes_stein_mean`; `vol_target`, `min_variance_longonly_with`, `erc_with`, `tangency_capped`; `sharpe_se_*`, `deflated_sharpe_ratio`, `sharpe_difference_test` | drifted weights and costs on traded notional, bands, partial rebalancing, volatility targeting with a chosen estimator; no golden values |
+| Real data (Python only) | `portopt.research.data.load_returns`, `scripts/fetch_data.py`, `data/real/registry.json` | Kenneth French files fetched at run time, checked against SHA-256 vintages, never committed; holdout refused without a registered study |
 
 ## Demo output
 
@@ -229,19 +231,72 @@ consecutive *targets*. The drift between targets is never traded or
 counted, and no transaction cost is charged anywhere.
 
 Worked example: T = 1250 gives dates 500, 563, ..., 1193, which is 12
-re-estimations and 11 turnover values over a 750-day holdout. The tangency
-row's average turnover of 18.2 means the target moved by 18 times NAV, on
-average, at each of those 11 dates. A real desk could not trade that, and
-the tangency row's 48% return should be read with that in mind and with
-the synthetic data in mind.
+re-estimations and 11 turnover values over a 750-day holdout. The
+tangency row equals unconstrained min variance, because the rule falls
+back at all 12 dates: at 8 rf is at or above `A/C`, and at 4 the tangency
+would exceed the 10x gross-leverage cap (`TANGENCY_MAX_LEVERAGE`,
+API_SPEC 3.3). Version 1.2.0 accepted those four portfolios, at 15x to
+94x gross leverage, and reported an average turnover of 18.2 for this
+row (LEARN 7.3; COOKBOOK 18 reproduces it with `max_leverage=math.inf`).
+That change in default behaviour is the one breaking change in 1.3.0.
+
+## Results
+
+**Synthetic study.** 144 configurations of 12 rules on the bundled data,
+net of 0 to 25 bp: no difference between rules is statistically
+meaningful (largest DSR 0.58, smallest paired p-value against equal
+weight 0.15). The data has constant drifts, so this checks the
+instruments, not any rule
+([docs/results/cost_aware_allocation.md](docs/results/cost_aware_allocation.md); measured).
+
+**Real-data development period, 1926 to 2015.** 10 and 49 Kenneth French
+industry portfolios, monthly rebalancing, 10 bp assumed cost, 206
+registered configurations. 1/N earned a net Sharpe of 0.47 on 10
+industries; most rules landed within 0.05 of it. Volatility targeting
+gained 0.13 (p = 0.02), almost all in 1928-1969; long-only min variance
+gained 0.15 on 49 industries (p = 0.15) at two thirds of the volatility;
+EWMA covariance lost; the uncapped tangency rule lost all its capital in
+1929
+([docs/results/real_data_study_dev.md](docs/results/real_data_study_dev.md); measured).
+
+**Pre-registered holdout, 2016-01 to 2026-09: a negative result.** Six
+hypotheses were registered before the holdout was read
+([docs/results/real_data_preregistration.md](docs/results/real_data_preregistration.md)).
+None is supported: every Holm-adjusted p-value is 1.00 and all six
+differences have the wrong sign. Volatility-targeted 1/N trailed 1/N by
+0.19 of Sharpe, min variance on 49 industries by 0.15 (with volatility
+cut from 18.2% to 14.0%), capped tangency by 0.40. The market (0.73) beat
+1/N (0.67 and 0.64). The tests had power of only 0.04 to 0.28, so this
+does not show the levers are worthless; it shows their development gains
+were too small and too regime-dependent to rely on
+([docs/results/real_data_study.md](docs/results/real_data_study.md); measured).
+
+**Benchmarks.** On one non-idle laptop, at n = 8 the long-only QP takes
+about 8 us in C++, Rust and Java and 460 us in Python; at n = 50, 2.9 to
+5.7 ms against 830 ms. Gaps below about 2x between languages are not
+meaningful
+([docs/results/benchmarks.md](docs/results/benchmarks.md); measured).
+
+## Forward paper portfolio
+
+[`forward/`](forward/README.md) keeps a monthly log of two rules frozen
+before the holdout was read: long-only min variance with Ledoit-Wolf
+constant-correlation covariance on 10 and 49 industries, 10 bp. It is
+hypothetical: the series are non-investable research indices, costs are
+assumed, no real money is involved, and it is not investment advice. A
+scheduled workflow (`.github/workflows/forward.yml`) appends one month at
+a time from 2026-11, and the results are published whatever they are.
+It is the only evidence in this repository that nothing could have been
+fitted to.
 
 ## What this is not
 
 - **Not a source of investment results.** The data is simulated (above).
   None of the backtest numbers say anything about markets.
-- **Not a realistic backtest.** No transaction costs, no drift between
-  re-estimations, no calendar, no benchmark statistics, no Sharpe standard
-  error (`python/src/portopt/backtest.py`).
+- **Not a realistic backtest in the pinned core.** The four-language
+  backtest has no transaction costs and no drift between re-estimations
+  (`python/src/portopt/backtest.py`). The Python research layer adds both
+  (`portopt.research.run_backtest_net`).
 - **Not a large-scale optimiser.** Linear algebra is dense with an O(n^3)
   Cholesky per solve, and the QP refactors its working set every iteration.
   We size it for n up to about 20 assets.
@@ -299,8 +354,9 @@ generator draws random numbers.
   `(weights, sweeps, converged)`; `erc_weights` and `risk_budget_weights`
   return the weights only and do not raise at the sweep cap, so call
   `risk_budget_solve` when you need to know.
-- **Leverage.** Unconstrained tangency and Black-Litterman weights are not
-  bounded. Check `gross_leverage` (4.14 for the demo tangency).
+- **Leverage.** `tangency_weights` raises above `max_leverage` (default
+  10); Black-Litterman weights are not bounded. Check `gross_leverage`
+  (4.14 for the demo tangency).
 
 ## Repository layout
 
@@ -308,7 +364,10 @@ generator draws random numbers.
 README.md, LEARN.md, COOKBOOK.md, API_SPEC.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md
 docs/       index.html (the Pages site), ARCHITECTURE.md, diagrams/, make_figures.py, img/
 data/       asset_returns.csv, market_caps.csv, views.json, config.json,
-            generate_data.py, golden/golden.json
+            generate_data.py, golden/golden.json, real/ (README, manifest, registry)
+docs/results/  study results, pre-registration, benchmarks
+forward/    run_forward.py, rules/, README.md (monthly paper log)
+scripts/    fetch_data.py
 python/     pyproject.toml, src/portopt/, tests/, demo.py
 cpp/        CMakeLists.txt, include/portopt/, src/, tests/
 rust/       Cargo.toml, src/, src/bin/demo.rs, tests/
@@ -317,27 +376,19 @@ java/       pom.xml, src/main/java/com/quant/portopt/, src/test/java/...
 
 ## Project status
 
-Version 1.2.0. Every change is recorded in [CHANGELOG.md](CHANGELOG.md).
-Fixed in 1.2.0, from the 2026-10-31 review:
-
-- the risk-parity weight wrappers now raise when the solver stops without
-  converging, in all four languages, as the QP wrappers already did;
-- the QP certificate now also checks dual feasibility (no active bound
-  carries a negative multiplier beyond tolerance), in all four languages;
-- a Python-only research layer (`portopt.research`) adds a backtest with
-  costs and weight drift, Sharpe standard errors, PSR, DSR and paired
-  tests; results are in
-  [docs/results/cost_aware_allocation.md](docs/results/cost_aware_allocation.md).
+Version 1.3.0. Every change is recorded in [CHANGELOG.md](CHANGELOG.md).
+New in 1.3.0: the tangency leverage cap, the cost-aware turnover QP in
+all four languages (three new golden cases), estimators and weight rules
+in the research layer, real data with a frozen holdout, a forward paper
+log, and kernel benchmarks.
 
 Still open:
 
 - costs and drift in the pinned four-language backtest (today only the
   Python research layer has them);
-- a solver that scales past a few dozen assets (incremental active-set
-  updates, flat storage, benchmarks);
-- property-based tests and full-matrix golden checks;
-- a real-data adapter with a frozen holdout, without which no result here
-  says anything about real markets.
+- a solver that scales past a few dozen assets (the n = 49 study used a
+  separate primal active-set solver in `python/studies/real_data_engine.py`);
+- volatility targeting and partial rebalancing in the forward runner.
 
 ## References
 

@@ -58,11 +58,11 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
     <h1>portfolio-construction</h1>
     <p class="badges">
       <a href="https://github.com/AshJha0/portfolio-construction/actions/workflows/ci.yml"><img src="https://github.com/AshJha0/portfolio-construction/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-      <a href="https://github.com/AshJha0/portfolio-construction/blob/main/CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.2.0-informational.svg" alt="Version 1.2.0"></a>
+      <a href="https://github.com/AshJha0/portfolio-construction/blob/main/CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.3.0-informational.svg" alt="Version 1.3.0"></a>
       <a href="https://github.com/AshJha0/portfolio-construction/blob/main/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-blue.svg" alt="MIT licence"></a>
     </p>
     <p>Portfolio construction answers one question: given a set of assets, how much of each should we hold? This project implements the classical answers (mean-variance optimisation, Black-Litterman and risk parity) four times, as a Python reference and ports in C++26, Rust and Java 25.</p>
-    <p>Every algorithm is pinned step by step in API_SPEC.md, and all four test suites check the same 23 golden cases in <code>data/golden/golden.json</code>. The ports call no numerical library, so the same arithmetic runs in every language. Version 1.2.0.</p>
+    <p>Every algorithm is pinned step by step in API_SPEC.md, and all four test suites check the same 26 golden cases in <code>data/golden/golden.json</code>. The ports call no numerical library, so the same arithmetic runs in every language. Version 1.3.0.</p>
     <nav>
       <a href="https://github.com/AshJha0/portfolio-construction/blob/main/LEARN.md">Learn (guide)</a>
       <a class="secondary" href="https://github.com/AshJha0/portfolio-construction/blob/main/COOKBOOK.md">Cookbook</a>
@@ -96,11 +96,11 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
   <h2>What is checked, and where</h2>
   <div class="numbers"><table>
     <tr><td>CI</td><td><code>.github/workflows/ci.yml</code>: Python 3.11 and 3.13, C++26 (GCC 14, Clang, MSVC), Rust stable and MSRV, Java 25 and 27, on Ubuntu, Windows and macOS; plus a job that diffs the four demo outputs</td></tr>
-    <tr><td>Golden suite</td><td>23 named cases in <code>golden.json</code>; every suite asserts the case count and |got - expect| &lt;= tol: analytic quantities 1e-10 to 1e-12, QP cases 1e-10, CCD and backtest metrics 1e-8 or 1e-9</td></tr>
+    <tr><td>Golden suite</td><td>26 named cases in <code>golden.json</code>; every suite asserts the case count and |got - expect| &lt;= tol: analytic quantities 1e-10 to 1e-12, QP cases 1e-10, CCD and backtest metrics 1e-8 or 1e-9</td></tr>
     <tr><td>Generator checks</td><td><code>data/generate_data.py</code> checks the reference before writing: closed forms vs <code>numpy.linalg.lstsq</code>, Ledoit-Wolf intensity vs a transcription of <code>covCor.m</code>, 4 QP cases vs scipy SLSQP with KKT residual &lt; 1e-12, the ERC equal-contribution identity, both Black-Litterman limits</td></tr>
     <tr><td>QP certificate</td><td>Goldfarb-Idnani dual active-set with closed-form polish; <code>converged</code>, <code>kkt_residual</code>, <code>iterations</code> returned; weights-only wrappers raise if the certificate fails</td></tr>
     <tr><td>Determinism</td><td>no random number generator in the library; only the data generator draws; long sums correctly rounded (Python <code>math.fsum</code>) or Neumaier compensated (ports)</td></tr>
-    <tr><td>Pinned numerics</td><td>Cholesky-Banachiewicz, relative pivot gate 1e-13; tangency raises when rf is at, above or within a relative 1e-6 of A/C; CCD tol 1e-10, at most 10,000 sweeps; 25-point frontier grid; backtest window 500, step 63, 252 periods per year</td></tr>
+    <tr><td>Pinned numerics</td><td>Cholesky-Banachiewicz, relative pivot gate 1e-13; tangency raises when rf is at or above A/C or when its gross leverage exceeds 10 (<code>TANGENCY_MAX_LEVERAGE</code>); CCD tol 1e-10, at most 10,000 sweeps; 25-point frontier grid; backtest window 500, step 63, 252 periods per year</td></tr>
   </table></div>
 
   <h2>What's inside</h2>
@@ -110,7 +110,7 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
     <div class="card"><h3>Pinned linear algebra</h3>
       <p><code>cholesky</code>, <code>chol_solve</code>, <code>spd_solve</code>, <code>spd_inverse</code>: Cholesky-Banachiewicz with a relative pivot gate of 1e-13; every inverse is a pair of triangular solves. A singular covariance (for example a duplicated asset) is rejected by the pivot gate, not repaired.</p></div>
     <div class="card"><h3>Markowitz</h3>
-      <p>Two-fund A, B, C, D scalars, <code>min_variance_weights</code>, <code>tangency_weights</code> (raises <code>TangencyUndefinedError</code> near or above the minimum-variance return), <code>gross_leverage</code> and a 25-point <code>efficient_frontier</code>. Box-constrained problems use a sort-based simplex projection (Duchi 2008, Kiwiel 2008) and a Goldfarb-Idnani dual active-set QP for <code>min_variance_longonly</code> and <code>constrained_frontier</code>.</p></div>
+      <p>Two-fund A, B, C, D scalars, <code>min_variance_weights</code>, <code>tangency_weights</code> (raises <code>TangencyUndefinedError</code> at or above the minimum-variance return, or above 10x gross leverage), <code>gross_leverage</code> and a 25-point <code>efficient_frontier</code>. Box-constrained problems use a sort-based simplex projection (Duchi 2008, Kiwiel 2008) and a Goldfarb-Idnani dual active-set QP for <code>min_variance_longonly</code> and <code>constrained_frontier</code>. <code>min_variance_turnover</code> and <code>mean_variance_turnover</code> add a turnover penalty <code>kappa * sum|w - w0|</code> and an optional turnover cap, solved exactly through the buy/sell split <code>w = w0 + b - s</code> with a KKT certificate.</p></div>
     <div class="card"><h3>Black-Litterman</h3>
       <p><code>implied_equilibrium_returns</code> (<code>pi = delta Sigma w_mkt</code>), <code>views_to_matrices</code> for absolute and relative views, He-Litterman <code>default_omega = diag(P tau Sigma P')</code> scaled by per-view confidence, and a posterior through one k-by-k Cholesky solve. Works in excess returns, so <code>bl_weights</code> uses rf = 0 by default. Idzorek's confidence calibration is not implemented.</p></div>
     <div class="card"><h3>Risk parity and budgeting</h3>
@@ -118,12 +118,23 @@ footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;text-align:center}
     <div class="card"><h3>Backtest-lite</h3>
       <p><code>run_backtest</code> re-estimates the target every 63 rows on an expanding window starting at 500 rows and holds that target exactly on every day in between: a daily-rebalanced constant mix. Turnover is L1 between consecutive targets; drift is not counted and no costs are charged. Metrics: <code>annualized_return</code>, <code>annualized_vol</code>, <code>sharpe_ratio</code>, <code>max_drawdown</code>.</p></div>
     <div class="card"><h3>Scope</h3>
-      <p>Daily simple returns as decimals; weights sum to 1 (negative = short); annual-decimal <code>rf</code>. Sized for up to about 20 assets (dense O(n^3) algebra). Out of scope: calendars, transaction costs, leverage or turnover constraints inside the optimiser, covariance repair, multi-period objectives.</p></div>
+      <p>Daily simple returns as decimals; weights sum to 1 (negative = short); annual-decimal <code>rf</code>. Sized for up to about 20 assets (dense O(n^3) algebra). Out of scope in the pinned core: calendars, transaction costs in the backtest, covariance repair, multi-period objectives. The Python research layer adds costs, drift, EWMA and nonlinear shrinkage estimators, volatility targeting and walk-forward evaluation on real data.</p></div>
     <div class="card"><h3>Guide and cookbook</h3>
-      <p>LEARN.md covers mean-variance foundations, estimation error, Ledoit-Wolf with a worked intensity, why long-only constraints regularise, Black-Litterman, risk parity, a desk workflow and a knowledge-check Q&amp;A. COOKBOOK.md holds task-oriented recipes in all four languages.</p></div>
+      <p>LEARN.md covers mean-variance foundations, estimation error, Ledoit-Wolf with a worked intensity, why long-only constraints regularise, Black-Litterman, risk parity, a desk workflow, where portfolio-construction P&amp;L comes from, and a knowledge-check Q&amp;A. COOKBOOK.md holds task-oriented recipes in all four languages.</p></div>
     <div class="card"><h3>References</h3>
       <p>Markowitz (1952); Merton (1972); Ledoit and Wolf (2004); Black and Litterman (1992); He and Litterman (1999); Maillard, Roncalli and Teiletche (2010); Spinu (2013); Griveau-Billion, Richard and Roncalli (2013); Goldfarb and Idnani (1983); Duchi et al. (2008); Kiwiel (2008); Neumaier (1974). Full list in the <a href="https://github.com/AshJha0/portfolio-construction#references">README</a>.</p></div>
   </div>
+
+  <h2>Results</h2>
+  <div class="numbers"><table>
+    <tr><td>Synthetic study</td><td>144 configurations on the bundled data; no difference between rules is statistically meaningful (largest DSR 0.58). Checks the instruments, not any rule. <a href="https://github.com/AshJha0/portfolio-construction/blob/main/docs/results/cost_aware_allocation.md">cost_aware_allocation.md</a></td></tr>
+    <tr><td>Real data, development 1926-2015</td><td>10 and 49 Kenneth French industries, monthly, 10 bp assumed. 1/N net Sharpe 0.47 on 10 industries; volatility targeting +0.13 (p = 0.02, mostly 1928-1969); min variance +0.15 on 49 industries (p = 0.15); uncapped tangency lost all capital in 1929. <a href="https://github.com/AshJha0/portfolio-construction/blob/main/docs/results/real_data_study_dev.md">real_data_study_dev.md</a></td></tr>
+    <tr><td>Pre-registered holdout 2016-01 to 2026-09</td><td>A negative result. None of six hypotheses supported; every Holm p-value 1.00; all six differences have the wrong sign (volatility-targeted 1/N -0.19, min variance on 49 industries -0.15, capped tangency -0.40). The market (0.73) beat 1/N (0.67, 0.64). Power was 0.04 to 0.28, so this does not show the levers are worthless, only that their development gains were too small and regime-dependent to rely on. <a href="https://github.com/AshJha0/portfolio-construction/blob/main/docs/results/real_data_study.md">real_data_study.md</a></td></tr>
+    <tr><td>Benchmarks</td><td>Long-only QP at n = 8: about 8 us in C++, Rust and Java, 460 us in Python; one non-idle laptop, gaps under 2x not meaningful. <a href="https://github.com/AshJha0/portfolio-construction/blob/main/docs/results/benchmarks.md">benchmarks.md</a></td></tr>
+  </table></div>
+
+  <h2>Forward paper portfolio</h2>
+  <p>A monthly log of two rules frozen before the holdout was read (long-only min variance, Ledoit-Wolf constant correlation, 10 and 49 industries, 10 bp), from 2026-11. Hypothetical: non-investable research indices, assumed costs, no real money, not investment advice. Results are published whatever they are. See <a href="https://github.com/AshJha0/portfolio-construction/blob/main/forward/README.md">forward/README.md</a>.</p>
 
   <h2>Quick start</h2>
 <pre>git clone https://github.com/AshJha0/portfolio-construction
@@ -161,7 +172,7 @@ python data/generate_data.py</pre>
       <p>A zero-dependency quantitative finance library for the JVM covering research, validation, execution and connectivity, with CI on every push. <a href="https://github.com/AshJha0/Quant-Finance-Library">GitHub</a></p></div>
   </div>
 
-  <footer>portfolio-construction 1.2.0. See the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/README.md">README</a>, the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/CHANGELOG.md">changelog</a> and the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/LICENSE">MIT licence</a>. Not investment advice.</footer>
+  <footer>portfolio-construction 1.3.0. See the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/README.md">README</a>, the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/CHANGELOG.md">changelog</a> and the <a href="https://github.com/AshJha0/portfolio-construction/blob/main/LICENSE">MIT licence</a>. Not investment advice.</footer>
 </div>
 </body>
 </html>

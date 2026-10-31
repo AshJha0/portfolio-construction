@@ -1,0 +1,13 @@
+flowchart TD
+    FR["Kenneth French Data Library (zip files)"] -->|"scripts/fetch_data.py, at run time"| RAW["data/real/raw/ (git-ignored)"]
+    RAW --> MAN["data/real/manifest.json: zip and parsed SHA-256 per vintage"]
+    REG["data/real/registry.json: studies and configurations, registered before running"] --> LR
+    MAN --> LR["research.data.load_returns(dataset, period, study_id)"]
+    RAW --> LR
+    LR -->|"period = development (before 2016-01-01)"| DEV["python/studies/real_data_study.py --phase dev"]
+    LR -->|"period = holdout, only with a registered study_id"| HO["phase 2: run once on r2-holdout-v1"]
+    LR -->|"holdout without study_id"| ERR["HoldoutAccessError"]
+    DEV --> DEVR["docs/results/real_data_study_dev.md"]
+    DEVR --> PRE["docs/results/real_data_preregistration.md: H1-H6, Holm, frozen forward rules"]
+    PRE --> HO
+    HO --> HOR["docs/results/real_data_study.md"]

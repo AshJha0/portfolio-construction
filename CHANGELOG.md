@@ -8,6 +8,88 @@ uses [semantic versioning](https://semver.org/). Dates are UTC.
 
 Nothing yet.
 
+## [1.3.0] - 2026-10-31
+
+Round-2 release: a tangency leverage cap, a cost-aware turnover QP in all
+four languages, an extended research layer, real data with a
+pre-registered holdout, a forward paper log and kernel benchmarks.
+
+**Breaking change in default behaviour.** `tangency_weights` now raises
+`TangencyUndefinedError` when the gross leverage of the result exceeds
+`max_leverage`, default `TANGENCY_MAX_LEVERAGE = 10` (C++
+`kTangencyMaxLeverage`). Code that relied on 1.2.0 accepting highly
+levered tangency portfolios must pass `max_leverage=math.inf` (Rust:
+`tangency_weights_capped(..., f64::INFINITY)`). On the bundled demo the
+tangency strategy now falls back to min variance at all 12 rebalances,
+so its row equals unconstrained min variance.
+
+### Added
+
+- Cost-aware QP (API_SPEC 3.7) in Python, C++, Rust and Java:
+  `min_variance_turnover[_solve]` and `mean_variance_turnover[_solve]`,
+  objective plus `kappa * sum|w - w0|` with an optional turnover cap,
+  solved exactly through the split `w = w0 + b - s` on the dual
+  active-set QP, with a KKT certificate of the nonsmooth problem
+  (`TurnoverQpResult`). Three golden cases (`minvar_turnover_l1`,
+  `minvar_turnover_capped`, `meanvar_turnover_box`), 26 in all.
+- `max_leverage` argument to `tangency_weights` (Python, C++, Java) and
+  `tangency_weights_capped` (Rust).
+- Demo: a cost-aware rebalancing section and a `min_var_tc` backtest row
+  (turnover penalty `kappa = 3e-5`); the tangency fallback note now
+  counts both reasons.
+- Research layer (`portopt.research`, Python only): `estimators` (EWMA,
+  EWMA constant correlation, Ledoit-Wolf toward the identity, Ledoit-Wolf
+  2020 nonlinear shrinkage, PCA factor model, Bayes-Stein and James-Stein
+  means); `strategies_v2` (covariance-estimator objects, weight rules on
+  them, `vol_target`); `data` (Kenneth French loader with SHA-256
+  vintages and a holdout gate); `walkforward` (trial registry,
+  calendar schedule, `walk_forward`); `run_backtest_net(vol_estimator=...)`.
+- Real data: `scripts/fetch_data.py`, `data/real/README.md`,
+  `manifest.json` and `registry.json`. Third-party files are fetched at
+  run time and never committed (`data/real/raw/` is git-ignored).
+- Studies: development results (`docs/results/real_data_study_dev.md`,
+  206 registered configurations), the pre-registration
+  (`docs/results/real_data_preregistration.md`) and the holdout result
+  (`docs/results/real_data_study.md`). The holdout is a negative result:
+  none of the six hypotheses is supported (every Holm-adjusted p-value
+  1.00, all six differences with the wrong sign), with power of 0.04 to
+  0.28.
+- Forward paper log: `forward/run_forward.py`, two frozen rule files in
+  `forward/rules/`, `forward/README.md` and the monthly workflow
+  `.github/workflows/forward.yml`. Hypothetical, non-investable indices,
+  no real money.
+- Kernel benchmarks in all four languages (`python/benchmarks/`,
+  `cpp/benchmarks/`, `rust/benches/`, Java `bench` profile), a CI smoke
+  job, and `docs/results/benchmarks.md`.
+- Docs: LEARN section 9 (where portfolio-construction P&L comes from),
+  COOKBOOK recipes 19 to 23, ARCHITECTURE diagrams
+  `real_data_holdout.mmd` and `forward_ledger.mmd`.
+
+### Changed
+
+- Python `shrink_covariance` evaluates its sums on numpy tiles by
+  default (2.4x to 22x faster; agrees with the loop reference, kept as
+  `_shrink_covariance_reference`, to 1e-13 relative). The golden case is
+  unchanged.
+- C++ `run_backtest` passes the weight function a non-owning
+  `HistoryView` instead of copying the history at each rebalance; the
+  `Matrix` overload remains.
+- `portopt.research.tangency_capped` passes `max_leverage=math.inf`,
+  since it applies its own cap.
+- COOKBOOK 18 passes `max_leverage=math.inf` so that it still shows what
+  the uncapped rule did.
+
+### Fixed
+
+- The 1.2.0 tangency guard (reject only when `A - rf*C` is within a
+  relative 1e-6 of cancelling) accepted 93.6x, 28.8x, 42.0x and 15.1x
+  gross leverage on the bundled backtest, which produced the demo's
+  18.2 average turnover. The leverage cap replaces it.
+- Stale documentation: test and golden counts, the tangency guard and
+  the turnover narrative in README, LEARN, COOKBOOK, the Pages site,
+  ARCHITECTURE and the Rust `PortOptError::TangencyUndefined` doc
+  comment.
+
 ## [1.2.0] - 2026-10-31
 
 Build, CI, correctness and documentation release. Every golden case in
@@ -149,7 +231,8 @@ Rust, Java)").
 - The synthetic data generator `data/generate_data.py` and the shared
   golden file `data/golden/golden.json` (21 cases).
 
-[Unreleased]: https://github.com/AshJha0/portfolio-construction/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/AshJha0/portfolio-construction/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/AshJha0/portfolio-construction/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/AshJha0/portfolio-construction/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/AshJha0/portfolio-construction/compare/ed814fc...v1.1.0
 [1.0.0]: https://github.com/AshJha0/portfolio-construction/commit/ed814fc
