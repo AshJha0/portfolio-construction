@@ -440,7 +440,7 @@ The two scaling knobs confuse everyone, so pin the semantics:
   a 1-D problem per view for the Omega that delivers it; that calibration
   is not implemented here.
 
-A subtlety worth knowing for interviews: with the default Omega, both
+A subtlety worth knowing: with the default Omega, both
 sides of the update scale with tau, so **the posterior mean is
 tau-invariant** — tau only matters when Omega is specified exogenously.
 The limit tests in the suite therefore fix Omega before sending
@@ -698,7 +698,7 @@ liability matching, tax) need different machinery.
 
 ---
 
-## 9. Interview-style Q&A
+## 9. Knowledge check: questions and worked answers
 
 **Q1. Derive the minimum-variance portfolio and explain why it doesn't
 depend on expected returns.**
