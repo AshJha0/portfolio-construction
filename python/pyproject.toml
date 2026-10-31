@@ -21,7 +21,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "scipy>=1.10", "ruff>=0.6", "mypy>=1.10"]
-docs = ["matplotlib>=3.7"]
+docs = ["matplotlib>=3.11.2"]
 
 [project.urls]
 Homepage = "https://ashjha0.github.io/portfolio-construction/"
