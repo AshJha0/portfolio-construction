@@ -23,7 +23,7 @@ path = "src/bin/demo.rs"
 # Benchmarks only (cargo bench); not linked into the library. Default
 # features off: no plotting or rayon, which keeps the tree on MSRV 1.78.
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "kernels"
