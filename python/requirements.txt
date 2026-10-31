@@ -4,4 +4,4 @@ numpy>=1.24
 
 # Test-only dependencies (scipy is used exclusively as a cross-check in tests).
 pytest>=7.0
-scipy>=1.10
+scipy>=1.17.1
