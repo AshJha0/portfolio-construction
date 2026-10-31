@@ -240,7 +240,7 @@ def _cov_pairwise(xt: np.ndarray) -> np.ndarray:
     s = np.empty((n, n), dtype=float)
     for i0, i1, j0, j1 in _tiles(n, t):
         prods = xt[i0:i1, None, :] * xt[None, j0:j1, :]
-        s[i0:i1, j0:j1] = np.add.reduce(prods, axis=-1) / (t - 1)
+        s[i0:i1, j0:j1] = np.sum(prods, axis=-1) / (t - 1)
     return s
 
 
@@ -316,9 +316,9 @@ def shrink_covariance(returns: np.ndarray) -> ShrinkageResult:
     for i0, i1, j0, j1 in _tiles(n, t):
         dev = xt[i0:i1, None, :] * xt[None, j0:j1, :]
         dev -= s_t[i0:i1, j0:j1, None]
-        pi[i0:i1, j0:j1] = np.add.reduce(dev * dev, axis=-1) / t
+        pi[i0:i1, j0:j1] = np.sum(dev * dev, axis=-1) / t
         dev *= xi2_dev[i0:i1, None, :]
-        theta[i0:i1, j0:j1] = np.add.reduce(dev, axis=-1) / t
+        theta[i0:i1, j0:j1] = np.sum(dev, axis=-1) / t
 
     pi_hat = _sequential_sum(pi)
     rho_terms = (rbar * np.sqrt(var_t[None, :] / var_t[:, None])) * theta
