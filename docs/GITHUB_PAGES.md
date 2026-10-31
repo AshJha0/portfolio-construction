@@ -43,7 +43,7 @@ the following change, update `docs/index.html` and `README.md` in the same
 commit:
 
 - the version (badge, header paragraph and footer);
-- the golden case count (23, from `data/golden/golden.json`);
+- the golden case count (26, from `data/golden/golden.json`);
 - the CI matrix (from `.github/workflows/ci.yml`);
 - the quickstart commands;
 - any number quoted from the demo or the figures (for example the

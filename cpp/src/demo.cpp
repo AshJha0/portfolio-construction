@@ -6,7 +6,8 @@
 ///
 /// Prints: estimator table, unconstrained + long-only frontier sweep,
 /// Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
-/// contributions, and a 63-day re-estimation backtest across six methods.
+/// contributions, cost-aware (turnover-penalised) long-only min variance,
+/// and a 63-day re-estimation backtest across seven methods.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -165,9 +166,34 @@ int main(int argc, char** argv) {
     };
     std::printf("RC spread: ERC %.2e, inv-vol %.2e\n", spread(rc_erc), spread(rc_iv));
 
+    // ------------------------------------------------------------ cost-aware
+    rule("Cost-aware rebalancing: long-only min variance from market weights");
+    std::printf(
+        "objective 1/2 w'Sw + kappa*sum|w - w0|, w0 = market weights, kappa in variance "
+        "units\n");
+    std::printf("%10s%10s%9s%11s\n", "kappa", "turnover", "vol", "certified");
+    for (double kappa : {0.0, 3e-5, 1e-4, 3e-4, 1e-3}) {
+      const portopt::TurnoverQpResult r_tc =
+          portopt::min_variance_turnover_solve(sig, w_mkt, kappa);
+      const double vol_tc = std::sqrt(portopt::dot(r_tc.weights, portopt::mat_vec(sig, r_tc.weights)));
+      const char* ok = (r_tc.converged && r_tc.kkt_residual < 1e-12) ? "yes" : "NO";
+      std::printf("%10.6f%10.4f%9.4f%11s\n", kappa, r_tc.turnover, vol_tc, ok);
+    }
+    const portopt::TurnoverQpResult r_cap =
+        portopt::min_variance_turnover_solve(sig, w_mkt, 0.0, Vector(), Vector(), 0.25);
+    std::printf("kappa 0 with turnover cap 0.25: turnover %.4f, vol %.4f\n", r_cap.turnover,
+                std::sqrt(portopt::dot(r_cap.weights, portopt::mat_vec(sig, r_cap.weights))));
+    std::printf("%14s", "");
+    for (const std::string& n : names) std::printf("%9.8s", n.c_str());
+    std::printf("\n");
+    wrow("w market", w_mkt);
+    wrow("w kappa 1e-4", portopt::min_variance_turnover(sig, w_mkt, 1e-4));
+    wrow("w cap 0.25", r_cap.weights);
+
     // -------------------------------------------------------------- backtest
     rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)");
-    int tangency_fallbacks = 0;
+    int fallback_undefined = 0;
+    int fallback_leverage = 0;
 
     const auto equal_weight_fn = [](const Matrix& h) {
       return Vector(h.cols(), 1.0 / static_cast<double>(h.cols()));
@@ -177,17 +203,34 @@ int main(int argc, char** argv) {
     };
     const auto tangency_fn = [&](const Matrix& h) {
       // Pinned backtest method: tangency, falling back to unconstrained
-      // min-variance for a rebalance where tangency is undefined or
-      // ill-conditioned — reported, not crashed (API_SPEC 6.3). Any other
-      // error (e.g. a singular covariance) propagates.
+      // min-variance for a rebalance where tangency is undefined (rf at or
+      // above A/C) or above the gross-leverage cap, reported, not crashed
+      // (API_SPEC 6.3). Any other error (e.g. a singular covariance)
+      // propagates.
       const Matrix s = portopt::annualize_cov(portopt::sample_cov(h));
+      const Vector m = portopt::annualize_mean(portopt::sample_mean(h));
       try {
-        return portopt::tangency_weights(
-            portopt::annualize_mean(portopt::sample_mean(h)), s, rf);
+        return portopt::tangency_weights(m, s, rf);
       } catch (const portopt::TangencyUndefinedError&) {
-        ++tangency_fallbacks;
+        const portopt::TwoFundScalars sc = portopt::two_fund_scalars(m, s);
+        if (sc.a - rf * sc.c <= 0.0) {
+          ++fallback_undefined;
+        } else {
+          ++fallback_leverage;
+        }
         return portopt::min_variance_weights(s);
       }
+    };
+    // Long-only min variance with turnover penalty kappa = 3e-5 against the
+    // previous target (equal weight before the first rebalance).
+    Vector prev_tc;
+    const auto min_var_tc_fn = [&](const Matrix& h) {
+      const Vector w0 =
+          prev_tc.empty() ? Vector(h.cols(), 1.0 / static_cast<double>(h.cols())) : prev_tc;
+      Vector w = portopt::min_variance_turnover(portopt::annualize_cov(portopt::sample_cov(h)),
+                                                w0, 3e-5);
+      prev_tc = w;
+      return w;
     };
     const auto bl_fn = [&](const Matrix& h) {
       const Matrix s = portopt::annualize_cov(portopt::sample_cov(h));
@@ -203,8 +246,9 @@ int main(int argc, char** argv) {
 
     const std::vector<std::pair<std::string, std::function<Vector(const Matrix&)>>>
         methods = {{"equal_weight", equal_weight_fn}, {"min_var_lo", min_var_lo_fn},
-                   {"tangency", tangency_fn},         {"black_litt", bl_fn},
-                   {"erc", erc_fn},                   {"inverse_vol", inverse_vol_fn}};
+                   {"min_var_tc", min_var_tc_fn},     {"tangency", tangency_fn},
+                   {"black_litt", bl_fn},             {"erc", erc_fn},
+                   {"inverse_vol", inverse_vol_fn}};
 
     std::printf("%-14s%9s%9s%9s%9s%11s\n", "method", "ann ret", "ann vol", "sharpe",
                 "max DD", "avg turno");
@@ -214,12 +258,16 @@ int main(int argc, char** argv) {
       std::printf("%-14s%9.4f%9.4f%9.4f%9.4f%11.4f\n", method.first.c_str(),
                   r.ann_return, r.ann_vol, r.sharpe, r.max_drawdown, r.avg_turnover);
     }
-    if (tangency_fallbacks > 0) {
+    const int n_fb = fallback_undefined + fallback_leverage;
+    if (n_fb > 0) {
       std::printf(
-          "note: tangency undefined/ill-conditioned at %d rebalance date(s) (rf at or "
-          "above the min-var return); fell back to min-variance there.\n",
-          tangency_fallbacks);
+          "note: tangency fell back to min-variance at %d rebalance date(s): %d with rf at "
+          "or above the min-var return A/C, %d above the %gx gross-leverage cap.\n",
+          n_fb, fallback_undefined, fallback_leverage, portopt::kTangencyMaxLeverage);
     }
+    std::printf(
+        "min_var_tc = min_var_lo with turnover penalty kappa = 3e-5 against the previous "
+        "target.\n");
 
     std::printf("\ndemo complete.\n");
     return 0;

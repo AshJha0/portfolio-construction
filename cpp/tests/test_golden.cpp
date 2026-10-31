@@ -47,7 +47,7 @@ BLParts bl_parts() {
 
 }  // namespace
 
-TEST(Golden, CaseCount) { EXPECT_EQ(testdata::golden().size(), 23u); }
+TEST(Golden, CaseCount) { EXPECT_EQ(testdata::golden().size(), 26u); }
 
 TEST(Golden, SampleMomentsDaily) {
   const auto& c = golden_case("sample_moments_daily");
@@ -298,4 +298,44 @@ TEST(Golden, QpGoldensAreInputStable) {
       },
       0.0, 500, 63);
   EXPECT_NEAR(r.avg_turnover, ct.expect.at("avg_turnover"), 1e-12);
+}
+
+namespace {
+
+void expect_turnover_case(const testdata::GoldenCase& c, const portopt::TurnoverQpResult& r) {
+  EXPECT_TRUE(r.converged);
+  EXPECT_LT(r.kkt_residual, 1e-12);
+  expect_vec_near(r.weights, golden_vec(c.expect, "w"), c.tol, "turnover w");
+  EXPECT_NEAR(r.turnover, c.expect.at("turnover"), c.tol);
+  EXPECT_NEAR(portopt::dot(r.weights, portopt::mat_vec(testdata::sigma_ann(), r.weights)),
+              c.expect.at("variance"), c.tol);
+}
+
+}  // namespace
+
+TEST(Golden, MinVarTurnoverL1) {
+  const auto& c = golden_case("minvar_turnover_l1");
+  expect_turnover_case(c, portopt::min_variance_turnover_solve(
+                              testdata::sigma_ann(), golden_vec(c.inputs, "w0"),
+                              c.inputs.at("kappa")));
+}
+
+TEST(Golden, MinVarTurnoverCapped) {
+  const auto& c = golden_case("minvar_turnover_capped");
+  const portopt::TurnoverQpResult r = portopt::min_variance_turnover_solve(
+      testdata::sigma_ann(), golden_vec(c.inputs, "w0"), c.inputs.at("kappa"), Vector(),
+      Vector(), c.inputs.at("max_turnover"));
+  expect_turnover_case(c, r);
+  EXPECT_NEAR(r.turnover, c.inputs.at("max_turnover"), 1e-12);
+}
+
+TEST(Golden, MeanVarTurnoverBox) {
+  const auto& c = golden_case("meanvar_turnover_box");
+  const std::size_t n = testdata::sigma_ann().rows();
+  const Vector w0 = golden_vec(c.inputs, "w0");
+  expect_vec_near(w0, testdata::w_mkt(), 1e-15, "w0 = market weights");
+  expect_turnover_case(
+      c, portopt::mean_variance_turnover_solve(
+             testdata::mu_ann(), testdata::sigma_ann(), w0, c.inputs.at("risk_aversion"),
+             c.inputs.at("kappa"), Vector(n, c.inputs.at("lb")), Vector(n, c.inputs.at("ub"))));
 }

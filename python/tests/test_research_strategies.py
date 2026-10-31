@@ -63,7 +63,7 @@ def test_rules_match_core_functions(history, bl_inputs):
     np.testing.assert_array_equal(rs.erc(shrink=True)(history), po.erc_weights(s_lw))
     np.testing.assert_array_equal(rs.min_variance_longonly()(history), po.min_variance_longonly(s))
     np.testing.assert_array_equal(
-        rs.tangency_capped(rf=0.0)(history), po.tangency_weights(mu, s, 0.0)
+        rs.tangency_capped(rf=0.0)(history), po.tangency_weights(mu, s, 0.0, max_leverage=math.inf)
     )
     pi = po.implied_equilibrium_returns(s, bl_inputs["w_mkt"], bl_inputs["delta"])
     w_bl, _ = po.bl_weights(

@@ -4,7 +4,8 @@ Run:  cd python && PYTHONPATH=src python3 demo.py
 
 Prints: estimator table, unconstrained + long-only frontier sweep,
 Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
-contributions, and a 63-day re-estimation backtest across six methods.
+contributions, cost-aware (turnover-penalised) long-only min variance,
+and a 63-day re-estimation backtest across seven methods.
 """
 
 from __future__ import annotations
@@ -113,22 +114,54 @@ def main() -> int:
         f"inv-vol {np.max(rc_iv) - np.min(rc_iv):.2e}"
     )
 
+    # ------------------------------------------------------------- cost-aware
+    rule("Cost-aware rebalancing: long-only min variance from market weights")
+    print("objective 1/2 w'Sw + kappa*sum|w - w0|, w0 = market weights, kappa in variance units")
+    print(f"{'kappa':>10}{'turnover':>10}{'vol':>9}{'certified':>11}")
+    for kappa in (0.0, 3e-5, 1e-4, 3e-4, 1e-3):
+        r_tc = po.min_variance_turnover_solve(sig, w_mkt, kappa)
+        vol_tc = np.sqrt(r_tc.weights @ sig @ r_tc.weights)
+        ok = "yes" if r_tc.converged and r_tc.kkt_residual < 1e-12 else "NO"
+        print(f"{kappa:>10.6f}{r_tc.turnover:>10.4f}{vol_tc:>9.4f}{ok:>11}")
+    r_cap = po.min_variance_turnover_solve(sig, w_mkt, 0.0, max_turnover=0.25)
+    print(
+        f"kappa 0 with turnover cap 0.25: turnover {r_cap.turnover:.4f}, "
+        f"vol {np.sqrt(r_cap.weights @ sig @ r_cap.weights):.4f}"
+    )
+    print(f"{'':14}" + "".join(f"{n[:8]:>9}" for n in names))
+    print(wrow("w market", w_mkt))
+    print(wrow("w kappa 1e-4", po.min_variance_turnover(sig, w_mkt, 1e-4)))
+    print(wrow("w cap 0.25", r_cap.weights))
+
     # ---------------------------------------------------------------- backtest
     rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)")
 
-    fallbacks = {"n": 0}
+    fallbacks = {"undefined": 0, "leverage": 0}
 
     def tangency_fn(h: np.ndarray) -> np.ndarray:
         """Pinned backtest method: tangency, falling back to unconstrained
-        min-variance for a rebalance where tangency is undefined or
-        ill-conditioned — reported, not crashed (API_SPEC 6.3).  Any other
-        error (e.g. a singular covariance) propagates."""
+        min-variance for a rebalance where tangency is undefined (rf at or
+        above A/C) or above the gross-leverage cap, reported, not crashed
+        (API_SPEC 6.3).  Any other error (e.g. a singular covariance)
+        propagates."""
         s = po.annualize_cov(po.sample_cov(h))
+        m = po.annualize_mean(po.sample_mean(h))
         try:
-            return po.tangency_weights(po.annualize_mean(po.sample_mean(h)), s, rf)
+            return po.tangency_weights(m, s, rf)
         except po.TangencyUndefinedError:
-            fallbacks["n"] += 1
+            sc = po.two_fund_scalars(m, s)
+            fallbacks["undefined" if sc.a - rf * sc.c <= 0.0 else "leverage"] += 1
             return po.min_variance_weights(s)
+
+    prev_tc: dict[str, np.ndarray] = {}
+
+    def min_var_tc_fn(h: np.ndarray) -> np.ndarray:
+        """Long-only min variance with turnover penalty kappa = 3e-5 against
+        the previous target (equal weight before the first rebalance)."""
+        w0 = prev_tc.get("w", np.full(h.shape[1], 1.0 / h.shape[1]))
+        w = po.min_variance_turnover(po.annualize_cov(po.sample_cov(h)), w0, 3e-5)
+        prev_tc["w"] = w
+        return w
 
     def bl_fn(h: np.ndarray) -> np.ndarray:
         s = po.annualize_cov(po.sample_cov(h))
@@ -139,6 +172,7 @@ def main() -> int:
     methods = {
         "equal_weight": lambda h: np.full(h.shape[1], 1.0 / h.shape[1]),
         "min_var_lo": lambda h: po.min_variance_longonly(po.annualize_cov(po.sample_cov(h))),
+        "min_var_tc": min_var_tc_fn,
         "tangency": tangency_fn,
         "black_litt": bl_fn,
         "erc": lambda h: po.erc_weights(po.sample_cov(h)),
@@ -154,11 +188,14 @@ def main() -> int:
             f"{r.max_drawdown:>9.4f}{r.avg_turnover:>11.4f}"
         )
 
-    if fallbacks["n"]:
+    n_fb = fallbacks["undefined"] + fallbacks["leverage"]
+    if n_fb:
         print(
-            f"note: tangency undefined/ill-conditioned at {fallbacks['n']} rebalance "
-            "date(s) (rf at or above the min-var return); fell back to min-variance there."
+            f"note: tangency fell back to min-variance at {n_fb} rebalance date(s): "
+            f"{fallbacks['undefined']} with rf at or above the min-var return A/C, "
+            f"{fallbacks['leverage']} above the {po.TANGENCY_MAX_LEVERAGE:g}x gross-leverage cap."
         )
+    print("min_var_tc = min_var_lo with turnover penalty kappa = 3e-5 against the previous target.")
 
     print("\ndemo complete.")
     return 0

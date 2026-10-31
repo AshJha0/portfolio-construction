@@ -24,7 +24,7 @@ public class GoldenTest {
 
     @Test
     public void goldenCaseCount() {
-        assertEquals("expected exactly 23 golden cases", 23, TestData.golden().size());
+        assertEquals("expected exactly 26 golden cases", 26, TestData.golden().size());
     }
 
     @Test
@@ -334,5 +334,60 @@ public class GoldenTest {
         assertEquals("relative", views.get(1).type());
         assertEquals("US_EQ", views.get(1).longAsset());
         assertEquals("EU_EQ", views.get(1).shortAsset());
+    }
+
+    private static double[] inputVector(String caseName, String prefix) {
+        java.util.Map<String, Object> in = TestData.inputs(caseName);
+        int n = 0;
+        while (in.containsKey(prefix + "_" + n)) {
+            n++;
+        }
+        double[] out = new double[n];
+        for (int i = 0; i < n; i++) {
+            out[i] = (Double) in.get(prefix + "_" + i);
+        }
+        return out;
+    }
+
+    private static void assertTurnoverCase(String c, Markowitz.TurnoverQpResult r) {
+        assertTrue(c + ": certified", r.converged() && r.kktResidual() < 1e-12);
+        assertVector(c, "w", r.weights());
+        assertEquals(TestData.expectScalar(c, "turnover"), r.turnover(), TestData.tol(c));
+        assertEquals(TestData.expectScalar(c, "variance"),
+                Linalg.quadForm(r.weights(), TestData.sigmaAnnualized()), TestData.tol(c));
+    }
+
+    @Test
+    public void minvarTurnoverL1() {
+        String c = "minvar_turnover_l1";
+        assertTurnoverCase(c, Markowitz.minVarianceTurnoverSolve(TestData.sigmaAnnualized(),
+                inputVector(c, "w0"), TestData.inputScalar(c, "kappa"), null, null,
+                Double.POSITIVE_INFINITY, Markowitz.QP_MAX_ITER));
+    }
+
+    @Test
+    public void minvarTurnoverCapped() {
+        String c = "minvar_turnover_capped";
+        double cap = TestData.inputScalar(c, "max_turnover");
+        Markowitz.TurnoverQpResult r = Markowitz.minVarianceTurnoverSolve(
+                TestData.sigmaAnnualized(), inputVector(c, "w0"), TestData.inputScalar(c, "kappa"),
+                null, null, cap, Markowitz.QP_MAX_ITER);
+        assertTurnoverCase(c, r);
+        assertEquals(cap, r.turnover(), 1e-12);
+    }
+
+    @Test
+    public void meanvarTurnoverBox() {
+        String c = "meanvar_turnover_box";
+        double[] w0 = inputVector(c, "w0");
+        double[] wm = TestData.wMkt();
+        for (int i = 0; i < wm.length; i++) {
+            assertEquals("w0 = market weights", wm[i], w0[i], 1e-15);
+        }
+        assertTurnoverCase(c, Markowitz.meanVarianceTurnoverSolve(TestData.muAnnualized(),
+                TestData.sigmaAnnualized(), w0, TestData.inputScalar(c, "risk_aversion"),
+                TestData.inputScalar(c, "kappa"), new double[] {TestData.inputScalar(c, "lb")},
+                new double[] {TestData.inputScalar(c, "ub")}, Double.POSITIVE_INFINITY,
+                Markowitz.QP_MAX_ITER));
     }
 }

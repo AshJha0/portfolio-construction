@@ -1,8 +1,11 @@
 #include "portopt/backtest.hpp"
 
 #include <cmath>
+#include <cstddef>
+#include <functional>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include "portopt/estimators.hpp"
 
@@ -99,8 +102,35 @@ std::vector<std::size_t> rebalance_indices(std::size_t t, int window, int step) 
   return out;
 }
 
+HistoryView::HistoryView(const Matrix& returns, std::size_t rows)
+    : src_(&returns), rows_(rows) {
+  if (rows > returns.rows()) {
+    std::ostringstream msg;
+    msg << "history view of " << rows << " rows exceeds the " << returns.rows()
+        << "-row returns matrix";
+    throw std::invalid_argument(msg.str());
+  }
+}
+
+Matrix HistoryView::to_matrix() const {
+  const std::size_t n = cols();
+  Matrix out(rows_, n);
+  for (std::size_t r = 0; r < rows_; ++r) {
+    for (std::size_t c = 0; c < n; ++c) out(r, c) = (*src_)(r, c);
+  }
+  return out;
+}
+
 BacktestResult run_backtest(const Matrix& returns,
                             const std::function<Vector(const Matrix&)>& weight_fn,
+                            double rf, int window, int step) {
+  const std::function<Vector(const HistoryView&)> via_copy =
+      [&weight_fn](const HistoryView& history) { return weight_fn(history.to_matrix()); };
+  return run_backtest(returns, via_copy, rf, window, step);
+}
+
+BacktestResult run_backtest(const Matrix& returns,
+                            const std::function<Vector(const HistoryView&)>& weight_fn,
                             double rf, int window, int step) {
   validate_returns(returns, 3);
   validate_rf(rf);
@@ -119,12 +149,8 @@ BacktestResult run_backtest(const Matrix& returns,
   Vector port(t - static_cast<std::size_t>(window), 0.0);
   for (std::size_t idx = 0; idx < k; ++idx) {
     const std::size_t t_k = dates[idx];
-    // Expanding history rows [0, t_k).
-    Matrix history(t_k, n);
-    for (std::size_t r = 0; r < t_k; ++r) {
-      for (std::size_t c = 0; c < n; ++c) history(r, c) = returns(r, c);
-    }
-    const Vector w = weight_fn(history);
+    // Expanding history rows [0, t_k), viewed in place (no copy).
+    const Vector w = weight_fn(HistoryView(returns, t_k));
     if (w.size() != n) {
       std::ostringstream msg;
       msg << "weight_fn returned an invalid weight vector at t=" << t_k;

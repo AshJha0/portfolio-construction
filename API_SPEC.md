@@ -131,11 +131,35 @@ D = B*C - A*A
   `PortOptError::TangencyUndefined`, Java
   `Markowitz.TangencyUndefinedException extends IllegalArgumentException`)
   if `A - rf*C <= 0` ("tangency undefined"; covers rf above every expected
-  return) **or** if `A - rf*C <= TANGENCY_COND_RTOL * max(|A|, |rf|*C)`
-  with pinned `TANGENCY_COND_RTOL = 1e-6` ("tangency ill-conditioned": rf
-  within one part per million of the min-variance return `A/C`, where the
-  weights scale like `1/(A - rf C)` and carry gross leverage of 1e6+).
-  For `n == 1`: `[1.0]` if `mu[0] > rf`, else tangency error.
+  return) **or** if `gross_leverage(w_tan) = sum_i |w_tan_i| > max_leverage`
+  ("tangency ill-conditioned"), with the parameter `max_leverage`
+  defaulting to the pinned `TANGENCY_MAX_LEVERAGE = 10` (C++
+  `kTangencyMaxLeverage`). `max_leverage` must be `>= 1` (every
+  sum-to-one vector has gross leverage at least 1) and not NaN, else the
+  invalid-input error; `+inf` disables the cap. Python, C++ and Java take
+  it as an optional argument; Rust keeps `tangency_weights(mu, sigma, rf)`
+  at the default and adds `tangency_weights_capped(mu, sigma, rf,
+  max_leverage)`. For `n == 1`: `[1.0]` if `mu[0] > rf`, else tangency
+  error (gross leverage is 1).
+
+  *Why a leverage cap* [derived, measured]. The weights are
+  `Sigma^-1 (mu - rf 1) / (A - rf C)`, so their size grows like
+  `1 / (A/C - rf)` as rf approaches the min-variance return from below.
+  The 1.2.0 guard (reject only when `A - rf C` is within a relative 1e-6
+  of cancelling) let through every gap above one part per million: on the
+  bundled backtest it accepted gaps of 0.07% to 0.5% and returned 93.6x,
+  28.8x, 42.0x and 15.1x gross leverage (round-2 review, section 2). The
+  quantity that does harm is the leverage itself, so the guard tests it
+  directly. It is dimensionless (the same under daily or annual units and
+  under any rescaling of Sigma and the excess returns together), needs no
+  asset-vol scale (a margin rule on `A/C - rf` does), and subsumes the old
+  test, since a 1e-6 relative gap means leverage of order 1e6. The default
+  10 is a policy choice, not a statistic: it sits above the full-sample
+  tangency at rf = 0.02 (4.14x, golden case `tangency_unconstrained`) and
+  the Black-Litterman posterior tangencies (about 1.2x), and below every
+  in-sample tangency the backtest produced when rf was within 0.6% of
+  `A/C`. Callers that cap leverage themselves (for example by blending
+  toward the GMV portfolio) pass a larger cap or `+inf`.
 - Gross leverage diagnostic: `gross_leverage(w) = sum_i |w_i|` (error on
   empty/non-finite input). Unconstrained tangency and BL weights should be
   capped on this number before they reach an OMS.
@@ -280,6 +304,130 @@ returned point is that minimizer up to rounding: ports agree to ~1e-13
 (golden tolerance 1e-10), and scaling the input returns by `1 + 2^-52`
 moves the golden values by < 1e-13 (tested in all four languages).
 
+The loop of step 1-5 also runs with a linear term,
+`min 1/2 x'Hx - lin'x`: it then starts at the unconstrained minimizer
+`x = H^-1 lin` instead of 0 and is otherwise unchanged (the step
+directions do not depend on `lin`), and it accepts general inequality
+rows `a'x >= b`, ordered after the upper bounds. The 3.6 entry points
+use neither, so their arithmetic is unchanged.
+
+### 3.7 Cost-aware QP: turnover penalty and turnover cap
+
+Problems (current portfolio `w0`, any finite vector of length n):
+
+```
+min_variance_turnover:   min 1/2 w'Sigma w                    + kappa * sum_i |w_i - w0_i|
+mean_variance_turnover:  min 1/2 w'Sigma w - mu'w / gamma     + kappa * sum_i |w_i - w0_i|
+s.t. 1'w = 1,  lb <= w <= ub,  [sum_i |w_i - w0_i| <= T]
+```
+
+`kappa >= 0` (finite) is the cost per unit of two-sided turnover in the
+objective's units (variance). The mean-variance form is
+`max mu'w - (gamma/2) w'Sigma w - gamma kappa TO` divided by
+`gamma = risk_aversion > 0`, so a cost rate `c` in return units maps to
+`kappa = c / gamma`. `T` (`max_turnover`) is optional; `+inf` (Python
+`None`) means no cap. Bounds as in 3.5 (defaults long-only). Gross
+leverage needs no separate constraint: with `lb >= 0` it is exactly 1.
+
+Plain idea: split the trade into buys and sells, `w = w0 + b - s` with
+`b, s >= 0`, so the absolute value becomes the linear cost
+`kappa 1'(b + s)`. That problem is convex but not strictly convex (the
+cost has no curvature in `b` or `s`, and `b` and `s` can grow together),
+which the dual method of 3.6 cannot start from. The pinned fix adds a
+proximal term that does not change the answer.
+
+Pinned formulation (3n variables `x = (w, b, s)`), with
+`eps = 0.5 / trace(Sigma^-1)` (computed as `sum_j solve(Sigma, e_j)[j]`
+with the 3.1 Cholesky, ascending j):
+
+```
+min 1/2 w'(Sigma - eps I)w + eps w0'w - c'w + eps/2 (b'b + s's) + kappa 1'(b + s)
+s.t. 1'w = 1  (then)  w_i - b_i + s_i = w0_i, i = 0..n-1   [equalities, in this order]
+     lb <= w <= ub,  b >= 0,  s >= 0,  [-(1'b + 1's) >= -T]
+```
+
+with `c = 0` (min-variance) or `c = mu / gamma`. Hessian
+`diag(Sigma - eps I, eps I, eps I)` is SPD because
+`eps <= lambda_min(Sigma) / 2` (`trace(Sigma^-1) >= 1/lambda_min`).
+Exactness [derived]: for fixed `w` with `d = w - w0`, minimising
+`kappa(b_i + s_i) + eps/2 (b_i^2 + s_i^2)` over `b_i - s_i = d_i`,
+`b_i, s_i >= 0` gives `b_i = max(d_i, 0)`, `s_i = max(-d_i, 0)` (raising
+both by `t > 0` adds `2 kappa t + eps(t|d_i| + t^2) > 0`), where
+`eps/2 (b_i^2 + s_i^2) = eps/2 d_i^2`. That cancels the `-eps/2 |w - w0|^2`
+built into the first two terms, so the minimum over `(b, s)` is the
+original objective plus a constant, for every `w`. The split problem is
+therefore strictly convex and has the original minimizer as its `w`
+part; any `0 < eps < lambda_min` gives the same `w`, so `eps` only sets
+the conditioning. With the cap the same argument holds (lowering both
+`b_i` and `s_i` keeps the cap satisfied).
+
+Algorithm:
+
+1. Validation, in order: sigma square and SPD (3.1), `max_iter >= 1`,
+   bounds (3.5 gate), `w0` length n and finite, `kappa` finite and
+   `>= 0`, `T` not NaN and `>= 0`; for the mean-variance form first `mu`
+   (as 3.3) and `gamma` finite and `> 0`. Cap feasibility: with
+   `wc = clip(w0, lb, ub)`, the smallest attainable turnover is
+   `TO_min = sum_i |wc_i - w0_i| + |1 - sum_i wc_i|` [derived: every
+   feasible `w` has `|w_i - w0_i| >= |wc_i - w0_i| + |w_i - wc_i|` when
+   `w0_i` is outside the box, and the second terms sum to at least
+   `|1 - sum wc|`]; error if `T < TO_min - 1e-12 (1 + TO_min)` (Rust
+   `Infeasible`, other ports the invalid-input error).
+2. `n == 1`: `w = [1.0]`, certified, 0 iterations, turnover `|1 - w0_0|`.
+3. Run the 3.6 loop (steps 1-5, with linear term `lin = (c - eps w0,
+   -kappa 1, -kappa 1)` and the cap as the one inequality row) on the
+   split problem.
+4. States from the final active set: coordinate i is *fixed* at `lb_i` if
+   `lb_i == ub_i` or its lower bound is active, at `ub_i` if its upper
+   bound is active, at `w0_i` (*hold*) if both `b_i >= 0` and `s_i >= 0`
+   are active; otherwise *free* with sign `+1` (buy: `s_i >= 0` active),
+   `-1` (sell: `b_i >= 0` active), or, with neither active, the sign of
+   `b_i - s_i` in the loop iterate (`>= 0` gives `+1`).
+5. Polish in `w` alone (eps-free): rows `1` (rhs 1), then, if the cap is
+   active, `-sgn` on free coordinates with rhs
+   `-T + sum_fixed |fix_i - w0_i| - sum_free sgn_i w0_i`, then `e_i` (rhs
+   `fix_i`) for fixed i ascending. With `c_eff = c - kappa sgn` (0 on fixed
+   coordinates) solve `min 1/2 w'Sigma w - c_eff'w` on these rows in closed
+   form: `x0 = solve(Sigma, c_eff)`, `Y = Sigma^-1 N`, `G = N'Y`,
+   `u = G^-1 (rhs - N'x0)`, `w = x0 + Y u`, one refinement step on the row
+   residual, then fixed coordinates set exactly. `nu = u_0` (budget
+   multiplier), `tau = u_1` if the cap row is present else 0. If `G` fails
+   the Cholesky gate the loop iterate is returned (clipped) with
+   `converged = false`, `kkt_residual = inf`.
+6. **Certificate** (of the original nonsmooth problem, not of the split
+   one): with `k = kappa + tau` and `g = Sigma w - c - nu 1`, every
+   coordinate needs `-g_i` in the subdifferential `[sL_i, sR_i]` of
+   `k |w_i - w0_i|` plus the indicator of `[lb_i, ub_i]`: `sL = -inf` at
+   the lower bound, else `-k` when `w_i <= w0_i` (at or left of the kink)
+   and `+k` otherwise; `sR = +inf` at a finite upper bound, else `+k` when
+   `w_i >= w0_i` and `-k` otherwise. "At" a bound or at `w0_i` means within
+   `QP_CONV_TOL (1 + |value|)`. Also `tau >= 0`, and complementarity: if
+   `tau > tol` the cap must bind (`T - TO <= feasibility tol`). Primal
+   feasibility (budget, bounds, cap) is checked to
+   `QP_CONV_TOL (1 + max(1, |w0|_inf, finite |lb|, |ub|, T))`, the dual
+   conditions to `QP_CONV_TOL (1 + |Sigma w|_inf + |c|_inf + |nu| + k)`.
+   `converged` is this certificate; `kkt_residual` the largest violation.
+   For a convex problem these conditions are sufficient, so a certified
+   point is optimal to that tolerance however the active set was found.
+7. Clip rounding-level bound violations; `turnover = sum_i |w_i - w0_i|`
+   (compensated sum).
+
+Result type: Python `TurnoverQpResult`, C++ `TurnoverQpResult`, Rust
+`TurnoverQpResult`, Java `Markowitz.TurnoverQpResult`, each with
+`weights, iterations, converged, kkt_residual, turnover`. The `*_solve`
+functions return it; the weights-only wrappers (`min_variance_turnover`,
+`mean_variance_turnover`) raise the 3.6 wrapper error when not certified.
+
+Properties (tested in all four languages): `kappa = 0` without a cap
+returns `min_variance_longonly` to 1e-12 for any `w0`; a feasible `w0`
+is returned unchanged for a large `kappa` (1 and 10 in the tests); turnover is
+non-increasing in `kappa` [derived: comparing the optimality of the two
+solutions gives `(k2 - k1)(TO2 - TO1) <= 0`]; a binding cap is met to
+1e-12; the certificate rejects a wrong budget multiplier, a perturbed
+point, a negative cap multiplier, and `tau > 0` with a slack cap. Python
+additionally cross-checks random problems against scipy SLSQP on the
+split formulation (trust-constr as the fallback).
+
 ---
 
 ## 4. Black-Litterman
@@ -420,10 +568,13 @@ Each maps history `h` (daily returns, rows `[0, t_k)`) to weights:
 - `min_var_lo`: QP long-only min-variance (3.6) on
   `252 * sample_cov(h)`.
 - `tangency`: unconstrained tangency (3.3) on
-  `(252*mean(h), 252*sample_cov(h))` with `rf = 0.02`; **on the tangency
-  error only** (undefined or ill-conditioned per 3.3) fall back to
-  unconstrained min-variance for that rebalance (reported, not crashed);
-  any other error (e.g. a singular covariance) propagates.
+  `(252*mean(h), 252*sample_cov(h))` with `rf = 0.02` and the default
+  10x leverage cap; **on the tangency error only** (undefined, or above
+  the cap, per 3.3) fall back to unconstrained min-variance for that
+  rebalance (reported, not crashed); any other error (e.g. a singular
+  covariance) propagates. On the bundled data this falls back at all 12
+  rebalances (8 with rf above `A/C`, 4 above the cap), so the row equals
+  unconstrained min variance.
 - `black_litt`: BL weights (4.5) with the full-sample `w_mkt`, the
   bundled views, `tau = 0.05`, `delta = 2.5`, on `252 * sample_cov(h)`.
 - `erc`: CCD ERC (5) on `sample_cov(h)` (scale-invariant).
@@ -440,7 +591,11 @@ Each maps history `h` (daily returns, rows `[0, t_k)`) to weights:
 | returns / series with NaN, inf or a value <= -1 | error (1, 6.2) |
 | `periods <= 0`, non-finite `rf` | error (1, 6.2) |
 | n = 1 | trivial `[1.0]` weights (3.3, 3.6); frontier target must equal mu[0]; covariance still validated |
-| rf >= min-variance return, or within 1e-6 (rel.) of it | tangency error, dedicated type (3.3) |
+| rf >= min-variance return, or tangency gross leverage > `max_leverage` (default 10) | tangency error, dedicated type (3.3) |
+| `max_leverage` < 1 or NaN | error (3.3) |
+| `kappa` < 0 or non-finite, `w0` wrong length or non-finite, `max_turnover` < 0 or NaN, `risk_aversion` <= 0 | error (3.7) |
+| turnover cap below the smallest attainable turnover | error (3.7) |
+| cost-aware QP certificate fails | `converged=False` from `*_turnover_solve`; weights-only wrappers raise (3.7) |
 | target return below min-var return (incl. negative) | frontier error (3.3) |
 | constrained target below constrained GMV return / above r_max | frontier error (3.6) |
 | mu proportional to 1 | degenerate-frontier error (3.3) |
@@ -467,7 +622,7 @@ Schema: `{"cases": [{"name", "inputs": {flat scalars}, "expect":
 `pi_0..pi_7`, etc.; matrix entries as `cov_i_j`. Comparisons are
 absolute: `|got - expect| <= tol`. Unless marked daily, cases use the
 annualized sample moments of `asset_returns.csv` (section 1). There are
-exactly **23** cases and every suite asserts that count.
+exactly **26** cases and every suite asserts that count.
 
 | case | contents | tol |
 |---|---|---|
@@ -494,9 +649,21 @@ exactly **23** cases and every suite asserts that count.
 | `backtest_equal_weight` | ann_return, ann_vol, sharpe, max_drawdown | 1e-8 |
 | `backtest_erc` | sharpe, max_drawdown | 1e-8 |
 | `turnover_minvar_longonly` | avg_turnover, n_rebalances (=12) | 1e-9 |
+| `minvar_turnover_l1` | w_0..w_7, turnover, variance (3.7, w0 = 1/8 each in inputs, kappa = 1e-3, long-only) | 1e-10 |
+| `minvar_turnover_capped` | w_0..w_7, turnover (= 0.5), variance (3.7, w0 = 1/8, kappa = 1e-4, max_turnover = 0.5 binding) | 1e-10 |
+| `meanvar_turnover_box` | w_0..w_7, turnover, variance (3.7 mean-variance, w0 = market weights, gamma = 2.5, kappa = 1e-3, lb 0.02, ub 0.40) | 1e-10 |
 
 Regeneration: `python3 data/generate_data.py` (also revalidates the
 closed forms against `numpy.linalg.lstsq`, the Ledoit-Wolf intensity
 against a transcription of `covCor.m`, the four QP cases against scipy
-SLSQP with KKT residual < 1e-12, the ERC equal-contribution identity, and
-both BL limits before writing).
+SLSQP with KKT residual < 1e-12, the three cost-aware cases against SLSQP
+on the split formulation with `kappa = 0` reproducing the long-only QP to
+1e-12, the ERC equal-contribution identity, and both BL limits before
+writing).
+
+The three cost-aware cases were added in round 2 by appending them to the
+committed file; the 23 earlier cases are byte-identical to 1.2.0.
+Regenerating on another platform can move a handful of earlier values by
+1 to 2 ulps (numpy's BLAS orders some dot products differently; checked
+by regenerating with the unmodified 1.2.0 code on Windows), far inside
+every tolerance.

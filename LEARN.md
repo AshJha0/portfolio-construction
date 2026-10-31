@@ -4,7 +4,7 @@ This document teaches the theory implemented in `portopt`: mean-variance
 optimisation and its closed forms, why the raw recipe fails on estimated
 inputs, covariance shrinkage, constrained optimisation and its KKT
 conditions, Black-Litterman, risk parity, and the backtest with its costs
-and error bars. It is written for two readers at once: a university
+and error bars, and where the P&L of a constructed portfolio comes from. It is written for two readers at once: a university
 student meeting the subject for the first time, and a reviewer at a fund
 who wants to check every number.
 
@@ -33,7 +33,7 @@ Every factual claim carries one of four evidence labels:
   `data/generate_data.py`, checked by all four test suites); `demo` means
   the output of `cd python && PYTHONPATH=src python demo.py`; `COOKBOOK n`
   means recipe n in [COOKBOOK.md](COOKBOOK.md), which reproduces the number.
-* **[cited: ...]**: taken from the named reference (section 10).
+* **[cited: ...]**: taken from the named reference (section 11).
 * **[assumed]**: a modelling choice or convention, not a fact.
 
 Unless stated otherwise, moments are annualised with factor 252 and the
@@ -176,10 +176,13 @@ sharpe_tan = sqrt(B - 2*rf*A + rf^2*C)
 The denominator `A - rf*C = 1' Sigma^{-1}(mu - rf*1)` must be positive,
 which means `rf < A/C`: the risk-free rate must be below the GMV return
 [derived]. Otherwise no line from `(0, rf)` touches the upper frontier
-and the code raises `TangencyUndefinedError`. The code also raises when
-`A - rf*C <= 1e-6 * max(|A|, |rf|*C)`, because the weights scale like
-`1/(A - rf*C)` and reach gross leverage of a million or more there
-[derived: `TANGENCY_COND_RTOL` in `markowitz.py`].
+and the code raises `TangencyUndefinedError`. Close to that boundary the
+weights scale like `1/(A - rf*C)`, so the code also raises when the gross
+leverage `sum_i |w_i|` of the result exceeds `max_leverage`, default
+`TANGENCY_MAX_LEVERAGE = 10` [derived: API_SPEC 3.3; `markowitz.py`].
+Version 1.2.0 used a different guard, a relative `1e-6` test on
+`A - rf*C`, which let through every gap above one part per million;
+1.3.0 tests the leverage itself (section 7 has the numbers).
 
 With a risk-free asset the two-fund theorem becomes a one-fund theorem:
 every mean-variance investor holds cash plus the same tangency portfolio,
@@ -194,8 +197,9 @@ any long-only portfolio.
 `sqrt(1.3427105 - 0.04*20.1810856 + 0.0004*626.0618355)
 = sqrt(0.7858918) = 0.8865054`, matching `tangency_unconstrained.sharpe`
 at rf = 0.02. Gross leverage is 4.14. In the backtest the error fires at
-8 of 12 rebalance dates, wherever the expanding-window GMV return falls
-below 2% [measured: COOKBOOK 18].
+all 12 rebalance dates: at 8 the expanding-window GMV return falls below
+2%, and at the other 4 the tangency would exceed 10x gross leverage
+[measured: `python python/demo.py`, note under the backtest table].
 
 ---
 
@@ -811,8 +815,11 @@ weights until the next date, and record what the portfolio earned.
   mean(r)`, `ann_vol = sqrt(252) * std(r, ddof=1)`, `sharpe =
   (ann_return - rf) / ann_vol`. Maximum drawdown is computed on the
   compounded wealth path `V_t = V_{t-1}(1 + r_t)`.
-* Nothing applies a gross-leverage cap. The tangency strategy in the demo
-  runs at gross leverage up to 93.6 [measured: COOKBOOK 18].
+* The backtest itself applies no gross-leverage cap. Since 1.3.0
+  `tangency_weights` refuses portfolios above 10x gross leverage
+  (section 1), so the demo's tangency rule falls back to min variance at
+  every date. Under 1.2.0 the same rule ran at up to 93.6x
+  [measured: COOKBOOK 18, which passes `max_leverage=math.inf`].
 
 **Glossary.** *Holdout*: the period the strategy is evaluated on, after
 the first estimation window. *Constant mix*: a portfolio rebalanced to
@@ -827,10 +834,18 @@ roughly half the variance [derived].
 |---|---|---|---|---|---|
 | equal_weight | 6.14% | 9.30% | 0.445 | 18.7% | 0.000 |
 | min_var_lo | 4.79% | 4.02% | 0.695 | 5.9% | 0.027 |
-| tangency | 48.35% | 57.49% | 0.806 | 47.0% | 18.197 |
+| min_var_tc | 4.79% | 4.03% | 0.693 | 5.9% | 0.010 |
+| tangency | 4.93% | 3.97% | 0.738 | 5.2% | 0.037 |
 | black_litt | 7.01% | 10.70% | 0.469 | 23.3% | 0.017 |
 | erc | 5.28% | 5.16% | 0.637 | 10.2% | 0.005 |
 | inverse_vol | 5.64% | 6.30% | 0.578 | 12.4% | 0.004 |
+
+The tangency row is unconstrained min variance at all 12 dates (8 with
+rf at or above `A/C`, 4 above the 10x cap), so it differs from
+`min_var_lo` only by allowing shorts. `min_var_tc` is long-only min
+variance with turnover penalty `kappa = 3e-5` against the previous
+target; it cuts average turnover from 0.027 to 0.010 at a cost of 0.0001
+in volatility [measured: `python python/demo.py`].
 
 On synthetic data, with no costs, and with the error bars of section
 7.2, this table describes the code's behaviour. It is not evidence that
@@ -889,38 +904,58 @@ day, and under arithmetic annualisation the annual drag is
 drag = c * (sum_k TO_k) / years
 ```
 
-**Why tangency turns over 18x NAV per quarter.** The tangency weight
-function falls back to unconstrained GMV whenever tangency is undefined.
+**What the uncapped tangency did under 1.2.0.** The tangency weight
+function falls back to unconstrained GMV whenever tangency is refused.
 At the first 8 dates the expanding-window GMV return `A/C` is below
 rf = 2%, so the strategy holds GMV and turns over 0.025 to 0.063 per
 quarter. At `t = 1004` `A/C` rises to 2.073%, just above rf; `A - rf*C`
-is small, and the tangency weights have gross leverage 93.6. Switching
-from GMV to that portfolio costs a turnover of 94.0. The next three
-rebalances, at gross leverage 28.8, 42.0 and 15.1, add 64.7, 13.8 and
-27.3 [measured: COOKBOOK 18]. The 11 turnovers sum to 200.2, and the mean
-is 18.197 [measured: demo]. The 48% annual return in the table comes from
-those last four quarters of extreme leverage.
+is small, and the tangency weights have gross leverage 93.6. Version
+1.2.0 accepted that portfolio, because its guard only rejected gaps
+below one part per million. Switching from GMV to it costs a turnover of
+94.0, and the rebalances at rows 1067, 1130 and 1193, at gross leverage
+28.8, 42.0 and 15.1, add 64.7, 13.8 and 27.3. The 11 turnovers sum to
+200.2, a mean of 18.2 per rebalance [measured: COOKBOOK 18 with
+`max_leverage=math.inf`; round-2 review]. Version 1.3.0 refuses all four
+of those portfolios (each is above 10x), so the demo's tangency row now
+equals unconstrained min variance.
+
+The lesson about estimation error does not depend on that demo. On real
+data (10 Kenneth French industries, 1928-2015, monthly rebalancing,
+10 bp), the uncapped tangency portfolio of trailing sample moments lost
+all of its capital between February and May 1929, at both 252- and
+504-day windows and at both cost levels. The same rule with gross
+leverage capped at 2 by moving toward minimum variance stayed solvent:
+net Sharpe 0.61 (252 days) and 0.59 (504 days) against 0.47 for 1/N,
+with turnover of 5 to 8 times NAV a year and drawdowns of 60 to 69%
+[measured: `docs/results/real_data_study_dev.md`, leverage control and
+fallbacks sections]. The cap changes the rule from one that cannot be
+held to one that can; whether it beats 1/N is a separate, registered
+question (hypothesis H5 in `docs/results/real_data_preregistration.md`).
 
 **Worked example: 5 bp per unit of turnover** [derived from the measured
 turnovers; assumed: c = 5 bp, linear]:
 
 * Target-to-target turnover: `0.0005 * 200.2 / 2.976 = 3.36%` a year for
-  tangency. For ERC (total 0.056) it is 0.001% a year.
+  the uncapped 1.2.0 tangency. For ERC (total 0.056) it is 0.001% a year.
 * The daily trades that keep the constant mix are larger. After a day
   with returns `r`, weights drift to `w_i (1 + r_i) / (1 + w'r)`;
   restoring `w` trades `sum_i |w_i - w_i (1 + r_i)/(1 + w'r)|`. Summed
-  over the holdout (excluding the rebalance days themselves), tangency
-  trades 222x NAV a year, which at 5 bp is a further 11.1% a year. ERC
+  over the holdout (excluding the rebalance days themselves), uncapped
+  tangency trades 222x NAV a year, which at 5 bp is a further 11.1% a year. ERC
   trades 0.90x NAV a year (0.045% at 5 bp) and equal weight 1.09x
   (0.054%), although both report near-zero target turnover
   [measured: COOKBOOK 18].
 
-Costs at this level change the ranking only for tangency; the cheaper
+Costs at this level change the ranking only for uncapped tangency; the cheaper
 methods lose less than a tenth of a percent a year [derived]. Real costs
 are not linear in size; a cost model with market impact grows faster
 than linearly in trade size, which penalises the leveraged strategy more
 [cited: Almgren and Chriss 2000]. The pinned backtest does not charge
-costs, and no optimiser constrains turnover [derived].
+costs. Since 1.3.0 the optimiser can: `min_variance_turnover` and
+`mean_variance_turnover` add `kappa * sum|w - w0|` to the objective and
+accept a turnover cap, solved exactly through the buy/sell split
+`w = w0 + b - s` and certified against the KKT conditions of the
+nonsmooth problem [derived: API_SPEC 3.7; COOKBOOK 19].
 
 **The research layer.** `python/src/portopt/research/` (Python only,
 outside the cross-language contract) runs the same schedule with
@@ -929,7 +964,7 @@ notional `sum_i |w_new_i - w_drift_i|` including the initial build, and
 offers a no-trade band, partial rebalancing, volatility targeting and a
 gross-leverage cap [derived: `research/costs.py`]. Its study,
 [`docs/results/cost_aware_allocation.md`](docs/results/cost_aware_allocation.md),
-reports for the tangency rule a turnover of 12.31x NAV per rebalance
+reports for the uncapped tangency rule a turnover of 12.31x NAV per rebalance
 after the initial build, a net Sharpe falling from 0.92 at 0 bp to 0.69
 at 25 bp, and a cost of 11.8% of NAV a year at 25 bp; capping gross
 leverage at 2 cuts turnover to 0.32 per rebalance; and no difference
@@ -945,11 +980,11 @@ mix, and a charged initial build.
 The pinned tangency policy falls back to unconstrained min-variance on
 `TangencyUndefinedError` only and reports how often it did so; any other
 error, such as a singular covariance, stops the run [derived:
-`python/demo.py::tangency_fn`; API_SPEC 6.3]. The conditioning guard of
-section 1.3 rejects tangency when rf is within one part per million of
-the GMV return. At `t = 1004` rf was 7.3e-4 below `A/C`, outside the
-guard, which is why that rebalance produced gross leverage 93.6
-[measured: COOKBOOK 18].
+`python/demo.py::tangency_fn`; API_SPEC 6.3]. Since 1.3.0 the leverage cap of
+section 1 refuses any tangency above 10x gross leverage. At `t = 1004`
+rf was 7.3e-4 below `A/C`; the 1.2.0 guard (one part per million) let
+that through at 93.6x, and the cap now refuses it [measured: COOKBOOK
+18 and 20].
 
 ---
 
@@ -1088,7 +1123,175 @@ machinery.
 
 ---
 
-## 9. Knowledge check: questions and worked answers
+## 9. Where portfolio-construction P&L comes from
+
+**Plain idea.** A portfolio earns money for five reasons, and only some
+of them are the optimiser's doing. The assets themselves have to earn a
+premium (alpha, or at least beta). The risk forecast decides how much of
+each to hold. Trading costs take a share of every rebalance. Leverage
+and the risk budget scale whatever is left, good or bad. The
+construction methods in this library work mostly on the second and
+fourth items, and our studies measure how much that is worth once the
+third is charged.
+
+**Formal statement.** For a portfolio with weights `w_t` set at
+rebalance `t`, the net excess return over the next period is
+[derived: accounting identity of `research/costs.py`]
+
+```
+r_net = s_t * w_t' (r - rf 1)  -  c * sum_i |w_new_i - w_drift_i|  +  (1 - s_t) * 0
+```
+
+with `s_t` the scale applied by volatility targeting or a leverage cap
+and `c` the cost per unit of traded notional. Taking expectations:
+
+* *Alpha and premia* enter only through `E[w' (r - rf 1)]`. A rule that
+  ignores means (min variance, ERC, 1/N) can still earn the premia of
+  what it holds, but it cannot select for them.
+* *Risk forecasts* enter through `w` itself. If the forecast `Sigma_hat`
+  is closer to the truth, min-variance weights are closer to the true
+  minimum-variance portfolio, and the Sharpe ratio rises when low-risk
+  assets earn at least as much per unit of risk as high-risk ones
+  [cited: Jagannathan and Ma 2003; Frazzini and Pedersen 2014].
+* *Costs* are a deterministic drag, `c` times annual turnover.
+* *Leverage and the risk budget* scale the mean and the volatility
+  together, so a constant scale leaves the Sharpe ratio unchanged; a
+  scale that moves inversely with forecast volatility can raise it if
+  volatility clusters and returns do not rise with it
+  [cited: Moreira and Muir 2017; Cederburg et al. 2020].
+
+**What the synthetic study found.** On the bundled data the drifts are
+constant and known, so there is no alpha to find and no volatility
+clustering to time. `docs/results/cost_aware_allocation.md` ran 144
+configurations (12 rules, 4 cost levels, 3 bands); no difference between
+rules was statistically meaningful (largest DSR 0.58, smallest paired
+p-value against equal weight 0.15 before correction), and the uncapped
+tangency rule paid 11.8% of NAV a year at 25 bp [measured:
+`python python/studies/cost_aware_allocation.py`, synthetic data]. That
+is the expected answer for data built that way, and it checks the
+instruments rather than any rule.
+
+**What the real-data development study found.** On 10 and 49 Kenneth
+French industry portfolios, 1926 to 2015, monthly rebalancing, 10 bp
+[measured: `docs/results/real_data_study_dev.md`, 206 registered
+configurations]:
+
+| Lever | Largest effect against its base | Where it came from |
+|---|---|---|
+| Risk forecast (long-only min variance vs 1/N) | +0.15 Sharpe on 49 industries (p = 0.15), at 11.2% vol against 16.4% | 2000-2015; slightly behind 1/N earlier |
+| Covariance estimator (shrinkage, PCA vs sample) | within 0.02; EWMA 0.97 lost 0.06 to 0.13 | long-only constraint already shrinks |
+| Costs (bands, partial rebalance, turnover QP) | at most about 0.02 | the cost was 0.03 to 0.23% a year to begin with |
+| Leverage (tangency capped at 2 vs uncapped) | uncapped lost all capital in 1929; capped 0.59 to 0.61 | the cap is what makes the rule holdable |
+| Risk budget (1/N scaled to 10% vol) | +0.13 (p = 0.02) on 10 industries; +0.03 on 49 | almost all in 1928-1969 |
+| Mean shrinkage (Bayes-Stein) | 0.00 (p = 0.87) | none |
+
+Nothing in that table is alpha in the usual sense: none of those
+construction rules forecasts which industries will outperform (the
+signal study below does). The gains come from holding less of
+the volatile assets and from scaling down in volatile decades, and the
+largest of them sit in one or two sub-periods.
+
+**What the holdout found.**
+
+The registered holdout (2016-01 to 2026-09, 2,701 trading days, study
+`r2-holdout-v1`, six one-sided hypotheses with Holm correction) was run
+once, and the result is negative: none of the six hypotheses is
+supported, every Holm-adjusted p-value is 1.00, and all six holdout
+differences have the wrong sign [measured:
+`docs/results/real_data_study.md`]. Volatility-targeted 1/N trailed
+plain 1/N by 0.19 of Sharpe (95% interval -0.38 to 0.00); long-only
+minimum variance on 49 industries trailed 1/N by 0.15, while cutting
+volatility from 18.2% to 14.0%; capped tangency trailed by 0.40 and
+still traded 7.9 times NAV a year. The cap-weighted market (0.73) beat
+1/N on both universes (0.67 and 0.64).
+
+What this shows: the development gains were too small and too
+dependent on particular decades to carry into 2016-2026. What it does
+not show: that these levers are worthless, because the tests had power
+of only 0.04 to 0.28 against the development effect sizes (next
+paragraph). Minimum variance still delivered what it is built to
+deliver, lower volatility; it did not deliver a higher Sharpe ratio.
+The two forward rules stay frozen as registered, because the protocol
+fixed them before the holdout was read.
+
+**What the signal study found.** The library also has return signals
+(`portopt.research.signals`): 12-1 momentum, time-series momentum,
+short-term reversal, low volatility and low beta, an equal or
+inverse-volatility combiner, alphas by `IC * sigma * z`, Black-Litterman
+views built from them, top-tercile rank portfolios, and sizing through
+the turnover QP. A separate study registered 66 development
+configurations and four hypotheses [measured:
+`docs/results/signal_study.md`; `docs/results/signal_preregistration.md`]:
+
+| id | Hypothesis (10 bp) | Development dSR (p) | 2016-2026 dSR (p) | Holm p |
+|---|---|---|---|---|
+| S1 | BL with 12-1 momentum views vs 1/N, 10 industries | 0.10 (0.01) | 0.01 (0.46) | 0.92 |
+| S2 | top tercile by 12-1 momentum vs 1/N, 49 industries | 0.11 (0.03) | 0.07 (0.27) | 0.81 |
+| S3 | turnover-penalised MV with momentum alphas vs min variance, 10 industries | 0.06 (0.17) | 0.12 (0.19) | 0.77 |
+| S4 | top tercile by low volatility vs 1/N, 49 industries | 0.09 (0.03) | -0.16 (0.92) | 0.92 |
+
+None is supported. Momentum improved on 1/N in development and kept a
+small positive sign in 2016-2026, but within one standard error (about
+0.1 to 0.2) and below the market (0.73); at 25 bp the gains shrink to
++0.03 and -0.02. Low volatility reversed. Short-term reversal lost about
+0.3 of Sharpe against 1/N in every development sub-period, at 15 times
+NAV turnover a year, because one-month industry returns continue rather
+than reverse [cited: Moskowitz and Grinblatt 1999]. The 2016-2026 period
+was a seen period for this study, not a clean holdout: the construction
+study's results on it had been read before the signals were chosen, and
+the registration was recorded locally in `data/real/registry.json`
+(2026-10-31T18:58:16Z) before the run but not pushed first. The honest
+summary is historical evidence for momentum before 2016 only, no edge established after costs and correction, being tracked forward: two momentum rules
+(`forward/rules/r2-signal-mom-bl-ind10.json`,
+`r2-signal-mom-rank-ind49.json`) joined the forward log.
+
+**Why statistical power is low.** The standard error of an annualised
+Sharpe ratio estimated over `Y` years of iid returns is about
+`sqrt((1 + SR^2/2) / Y)` [derived: Lo 2002, annual form]. For SR = 0.5:
+
+| Years | SE of one Sharpe ratio |
+|---:|---:|
+| 3 (the bundled holdout) | 0.61 |
+| 10 (the real-data holdout) | 0.34 |
+| 88 (the development period) | 0.11 |
+
+The development page measures 0.12 for 1/N by block bootstrap, about 20%
+above the iid figure because volatility clusters [measured:
+`real_data_study_dev.md`, block length section]. A paired difference
+between two similar rules has a smaller standard error, because their
+returns move together, but the effects are small too: the
+pre-registration puts the power of the six holdout tests at 0.03 to 0.28
+at the Holm-corrected level, against the development effect sizes
+[measured: `real_data_preregistration.md`, section 4]. Ten years cannot
+confirm a 0.1 Sharpe improvement; it can only fail to contradict it, or
+contradict a large one.
+
+**Worked example.** Volatility targeting of 1/N gained 0.13 in
+development with a paired standard error of 0.056 over 23,111 days.
+Scaling to the roughly 2,700 holdout days gives
+`0.056 * sqrt(23111 / 2700) = 0.164`, so a true gain of 0.13 would
+produce a z-statistic of about 0.8 on average, well short of the 1.645
+a one-sided 5% test needs; 80% power would need a true gain of 0.41
+[derived from the measured standard error; the pre-registration lists
+the same 0.164 and 0.41].
+
+**The forward log is the only unfitted evidence.** Every development
+number above was produced after the rules, windows and estimators were
+chosen by people (the literature and us) who had seen much of that
+history, and even the holdout is clean only with respect to this
+repository's own choices. `forward/` records four frozen rules (long-only
+min variance with Ledoit-Wolf constant-correlation covariance on 10 and
+49 industries, Black-Litterman with momentum views on 10 industries, and
+the momentum top tercile on 49) month by month from 2026-11, on data that did not exist
+when the rules were written [derived: `forward/README.md`;
+`forward/rules/*.json`]. It is a hypothetical paper portfolio on
+non-investable index series, with assumed costs and no real money, and
+at one observation a month it will take many years to say anything
+precise; its value is that nothing in it can have been fitted.
+
+---
+
+## 10. Knowledge check: questions and worked answers
 
 **Q1. Derive the minimum-variance portfolio and explain why it does not
 depend on expected returns.**
@@ -1161,8 +1364,9 @@ what do you do?**
 `A - rf*C <= 0`: rf is at or above the GMV return, so no line from
 `(0, rf)` touches the upper frontier. With estimated means this is common
 (8 of 12 rebalances in the bundled backtest). The same error fires when
-rf is within a relative 1e-6 of the GMV return, where `A - rf*C` cancels
-and the weights have gross leverage in the millions. Options: fall back
+the tangency's gross leverage exceeds `max_leverage` (default 10), which
+happens when rf sits just below the GMV return (the other 4 rebalances,
+at 15x to 94x). Options: fall back
 to GMV (the pinned choice), use excess-return Black-Litterman inputs, or
 treat it as a sign that the estimated frontier is too flat to bet on.
 Look at `gross_leverage` before trusting any unconstrained weights.
@@ -1202,14 +1406,17 @@ Lo (2002), iid case: `SR_p = 0.69 / sqrt(252) = 0.0437`,
 cannot distinguish the strategy from zero, let alone from another
 strategy with Sharpe 0.6.
 
-**Q14. The demo's tangency strategy turns over 18.2x NAV per quarter.
-Where does that number come from, and what would 5 bp per unit cost?**
-It is the mean of 11 target-to-target turnovers. Seven are below 0.07
+**Q14. Under 1.2.0 the demo's tangency strategy turned over 18.2x NAV
+per quarter. Where did that number come from, and why is it gone in
+1.3.0?**
+It was the mean of 11 target-to-target turnovers. Seven are below 0.07
 (GMV fallback to GMV fallback); the switch from GMV to a tangency
-portfolio with gross leverage 93.6 at `t = 1004` costs 94.0, and the
-next three add 106. At 5 bp the 200.2 units cost 10.0% of NAV over 2.98
-years, 3.36% a year, before the 11.1% a year from the daily constant-mix
-trades that the backtest does not count.
+portfolio with gross leverage 93.6 at `t = 1004` cost 94.0, and the
+next three added 106. At 5 bp the 200.2 units cost 3.36% a year, before
+the 11.1% a year from the daily constant-mix trades that the backtest
+does not count (COOKBOOK 18). Under 1.3.0 `tangency_weights` refuses
+all four of those portfolios because each exceeds 10x gross leverage,
+so the rule holds unconstrained GMV throughout and averages 0.037.
 
 **Q15. Equal weight reports zero turnover. Is it free to run?**
 No. The backtest holds a daily-rebalanced constant mix, and target
@@ -1246,7 +1453,7 @@ the mean does not.
 
 ---
 
-## 10. Further reading
+## 11. Further reading
 
 * H. Markowitz (1952), *Portfolio Selection*, Journal of Finance 7(1).
 * R. Merton (1972), *An Analytic Derivation of the Efficient Portfolio
@@ -1299,5 +1506,12 @@ the mean does not.
 * P. Mertens (2002), comment on the variance of the iid Sharpe estimator
   in Lo (2002); D. Bailey, M. Lopez de Prado (2012), *The Sharpe Ratio
   Efficient Frontier*, Journal of Risk 15(2). Used by the research layer.
+* A. Moreira, T. Muir (2017), *Volatility-Managed Portfolios*, Journal
+  of Finance 72(4); S. Cederburg, M. O'Doherty, F. Wang, X. Yan (2020),
+  *On the Performance of Volatility-Managed Portfolios*, Journal of
+  Financial Economics 138(1). The case for and against volatility
+  targeting (section 9).
+* K. French, Data Library (mba.tuck.dartmouth.edu/pages/faculty/ken.french),
+  daily industry portfolios and factors. The real data of section 9.
 * Project review, `portfolio-construction-review-2026-10-31.md` (outside
   the repository): findings 4, 5, 11 and 14 are cited above.

@@ -21,7 +21,8 @@ Rebalance at ``t_k`` (executed at the start of the day, before row
 
 1. Scaling.  The raw target ``u`` is multiplied by a scalar ``s``.  With
    ``vol_target`` set, ``s = vol_target / sqrt(u' Sigma u)`` where Sigma is
-   the annualized sample covariance of the history.  With ``max_gross``
+   the annualized sample covariance of the history, or the output of
+   ``vol_estimator(history)`` when one is given.  With ``max_gross``
    set, ``s`` is then reduced, if needed, so that ``s * sum|u_i| <=
    max_gross``.  Whatever is not in risky assets sits in cash.
 2. Decision.  The first rebalance (the initial build from all cash) is
@@ -182,6 +183,7 @@ def run_backtest_net(
     rf: float = 0.0,
     vol_target: float | None = None,
     max_gross: float | None = None,
+    vol_estimator: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> NetBacktestResult:
     """Backtest with drifted weights, transaction costs and trading rules.
 
@@ -211,6 +213,13 @@ def run_backtest_net(
         Annualized ex-ante volatility target (None disables it).
     max_gross:
         Cap on ``sum_i |w_i|`` of the scaled target (None disables it).
+    vol_estimator:
+        Covariance used by ``vol_target``: ``vol_estimator(history)``
+        must return the n x n annualized covariance of the history (for
+        example a :class:`portopt.research.strategies_v2.CovarianceEstimator`
+        such as an EWMA estimator).  None, the default, uses the
+        annualized ``ddof=1`` sample covariance.  Ignored when
+        ``vol_target`` is None.
 
     Raises
     ------
@@ -240,6 +249,8 @@ def run_backtest_net(
     mg = _optional_positive("max_gross", max_gross)
     if not callable(weight_fn):
         raise ValueError("weight_fn must be callable")
+    if vol_estimator is not None and not callable(vol_estimator):
+        raise ValueError("vol_estimator must be None or callable")
 
     rf_d = rfv / ANNUALIZATION
     dates = rebalance_indices(t, win, stp)
@@ -269,7 +280,14 @@ def run_backtest_net(
             )
         s = 1.0
         if vt is not None:
-            sig = annualize_cov(sample_cov(x[:t_k]), ANNUALIZATION)
+            if vol_estimator is None:
+                sig = annualize_cov(sample_cov(x[:t_k]), ANNUALIZATION)
+            else:
+                sig = np.asarray(vol_estimator(history), dtype=float)
+                if sig.shape != (n, n) or not np.isfinite(sig).all():
+                    raise ValueError(
+                        f"vol_estimator must return a finite {n} x {n} matrix at t={t_k}"
+                    )
             var = float(u @ sig @ u)
             if not var > 0.0:
                 raise ValueError(f"vol_target: ex-ante volatility is zero at t={t_k}")

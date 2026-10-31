@@ -101,17 +101,30 @@ TEST(Markowitz, FrontierGridWhenGmvReturnExceedsMaxMu) {
 }
 
 TEST(Markowitz, TangencyNearGmvRejected) {
-  // rf within 1e-6 (relative) of A/C: catastrophic cancellation (MAJ-1).
+  // Gross leverage scales like 1 / (A/C - rf): the guard rejects any
+  // tangency above max_leverage (default 10), from rf within rounding of
+  // A/C up to merely close to it; rf = 0.02 on the full sample (4.14x) passes.
   const Vector& mu = testdata::mu_ann();
   const Matrix& sig = testdata::sigma_ann();
   const portopt::TwoFundScalars sc = portopt::two_fund_scalars(mu, sig);
   const double r_gmv = sc.a / sc.c;
-  EXPECT_THROW(portopt::tangency_weights(mu, sig, r_gmv - 1e-13),
+  for (double gap : {1e-13, 1e-9, 1e-3}) {
+    EXPECT_THROW(portopt::tangency_weights(mu, sig, r_gmv - gap),
+                 portopt::TangencyUndefinedError);
+  }
+  const double lev02 = portopt::gross_leverage(portopt::tangency_weights(mu, sig, 0.02));
+  EXPECT_GE(lev02, 1.0);
+  EXPECT_LE(lev02, portopt::kTangencyMaxLeverage);
+  portopt::tangency_weights(mu, sig, 0.02, lev02);  // exactly at the cap passes
+  EXPECT_THROW(portopt::tangency_weights(mu, sig, 0.02, lev02 * (1.0 - 1e-12)),
                portopt::TangencyUndefinedError);
-  EXPECT_THROW(portopt::tangency_weights(mu, sig, r_gmv - 1e-9),
-               portopt::TangencyUndefinedError);
-  const Vector w = portopt::tangency_weights(mu, sig, r_gmv - 1e-3);
+  EXPECT_THROW(portopt::tangency_weights(mu, sig, 0.02, 0.5), std::invalid_argument);
+  EXPECT_THROW(portopt::tangency_weights(mu, sig, 0.02, std::nan("")),
+               std::invalid_argument);
+  const Vector w = portopt::tangency_weights(mu, sig, r_gmv - 1e-3, 1e3);
+  EXPECT_EQ(w, portopt::tangency_weights(mu, sig, r_gmv - 1e-3, kInf));
   EXPECT_NEAR(vsum(w), 1.0, 1e-8);
+  EXPECT_GT(portopt::gross_leverage(w), portopt::kTangencyMaxLeverage);
   double l1 = 0.0;
   for (double v : w) l1 += std::fabs(v);
   EXPECT_NEAR(portopt::gross_leverage(w), l1, 1e-12);
@@ -472,4 +485,254 @@ TEST(Markowitz, QpWithActiveBoundsStillCertified) {
       portopt::constrained_frontier_solve(mu, sig, 0.07, Vector(n, 0.0), Vector(n, 0.5));
   EXPECT_TRUE(fr.converged);
   EXPECT_LT(fr.kkt_residual, 1e-9);
+}
+
+// ------------------------------------------------------------ cost-aware QP
+
+namespace {
+
+Vector w_market() {
+  const Vector caps{30.0, 20.0, 8.0, 6.0, 7.0, 25.0, 15.0, 10.0};
+  Vector w(caps);
+  const double s = vsum(caps);
+  for (double& v : w) v /= s;
+  return w;
+}
+
+double max_abs_diff(const Vector& a, const Vector& b) {
+  double m = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) m = std::max(m, std::fabs(a[i] - b[i]));
+  return m;
+}
+
+}  // namespace
+
+TEST(Turnover, KappaZeroMatchesLongOnlyQp) {
+  const Matrix& sig = testdata::sigma_ann();
+  const std::size_t n = sig.rows();
+  Vector e0(n, 0.0);
+  e0[0] = 1.0;
+  Vector ramp(n, 0.0);
+  for (std::size_t i = 0; i < n; ++i) ramp[i] = -0.2 + 0.1 * static_cast<double>(i);
+  for (const Vector& w0 : {Vector(n, 1.0 / static_cast<double>(n)), e0, ramp}) {
+    for (const auto& b : {std::pair<double, double>{0.0, kInf}, {0.02, 0.40}, {0.0, 0.25}}) {
+      const Vector lb(n, b.first);
+      const Vector ub(n, b.second);
+      const portopt::TurnoverQpResult r =
+          portopt::min_variance_turnover_solve(sig, w0, 0.0, lb, ub);
+      EXPECT_TRUE(r.converged);
+      EXPECT_LT(r.kkt_residual, 1e-12);
+      const Vector ref = portopt::min_variance_longonly(sig, lb, ub);
+      EXPECT_LT(max_abs_diff(r.weights, ref), 1e-12);
+    }
+  }
+}
+
+TEST(Turnover, LargeKappaReturnsFeasibleW0) {
+  const Matrix& sig = testdata::sigma_ann();
+  const std::size_t n = sig.rows();
+  const Vector eq(n, 1.0 / static_cast<double>(n));
+  const Vector wm = w_market();
+  Vector two(n, 0.0);
+  two[0] = 0.5;
+  two[5] = 0.5;
+  const portopt::TurnoverQpResult a = portopt::min_variance_turnover_solve(sig, eq, 1.0);
+  EXPECT_TRUE(a.converged);
+  EXPECT_LT(max_abs_diff(a.weights, eq), 1e-12);
+  EXPECT_LT(a.turnover, 1e-12);
+  const portopt::TurnoverQpResult b =
+      portopt::min_variance_turnover_solve(sig, wm, 1.0, Vector(n, 0.02), Vector(n, 0.40));
+  EXPECT_TRUE(b.converged);
+  EXPECT_LT(max_abs_diff(b.weights, wm), 1e-12);
+  const portopt::TurnoverQpResult c = portopt::min_variance_turnover_solve(sig, two, 1.0);
+  EXPECT_TRUE(c.converged);
+  EXPECT_LT(max_abs_diff(c.weights, two), 1e-12);
+  const portopt::TurnoverQpResult d =
+      portopt::mean_variance_turnover_solve(testdata::mu_ann(), sig, wm, 2.5, 10.0);
+  EXPECT_TRUE(d.converged);
+  EXPECT_LT(max_abs_diff(d.weights, wm), 1e-12);
+}
+
+TEST(Turnover, MonotoneDecreasingInKappa) {
+  const Matrix& sig = testdata::sigma_ann();
+  const std::size_t n = sig.rows();
+  const Vector eq(n, 1.0 / static_cast<double>(n));
+  const Vector wm = w_market();
+  const double kappas[] = {0.0, 1e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 1e-1};
+  for (int variant = 0; variant < 2; ++variant) {
+    double prev = kInf;
+    double first = 0.0;
+    for (double k : kappas) {
+      const portopt::TurnoverQpResult r =
+          variant == 0 ? portopt::min_variance_turnover_solve(sig, eq, k)
+                       : portopt::mean_variance_turnover_solve(
+                             testdata::mu_ann(), sig, wm, 2.5, k, Vector(n, 0.02),
+                             Vector(n, 0.40));
+      EXPECT_TRUE(r.converged);
+      EXPECT_LE(r.turnover, prev + 1e-12) << "kappa " << k;
+      if (k == 0.0) first = r.turnover;
+      prev = r.turnover;
+    }
+    EXPECT_GT(first, 0.3);
+    EXPECT_LT(prev, 1e-12);
+  }
+}
+
+TEST(Turnover, CapBindsAndIsCertified) {
+  const Matrix& sig = testdata::sigma_ann();
+  const std::size_t n = sig.rows();
+  const Vector eq(n, 1.0 / static_cast<double>(n));
+  const portopt::TurnoverQpResult free_r = portopt::min_variance_turnover_solve(sig, eq, 1e-4);
+  for (double cap : {0.8, 0.5, 0.2, 0.05, 0.0}) {
+    const portopt::TurnoverQpResult r =
+        portopt::min_variance_turnover_solve(sig, eq, 1e-4, Vector(), Vector(), cap);
+    EXPECT_TRUE(r.converged) << cap;
+    EXPECT_LT(r.kkt_residual, 1e-12);
+    EXPECT_NEAR(r.turnover, std::min(cap, free_r.turnover), 1e-12);
+  }
+  const portopt::TurnoverQpResult loose =
+      portopt::min_variance_turnover_solve(sig, eq, 1e-4, Vector(), Vector(), 5.0);
+  EXPECT_LT(max_abs_diff(loose.weights, free_r.weights), 1e-12);
+  // w0 outside the box: smallest attainable turnover 0.3 + 0.1 + 0.4 = 0.8.
+  Vector bad(n, 0.0);
+  bad[0] = 0.6;
+  bad[1] = 0.4;
+  EXPECT_THROW(portopt::min_variance_turnover_solve(sig, bad, 0.0, Vector(), Vector(n, 0.3),
+                                                    0.7),
+               std::invalid_argument);
+  const portopt::TurnoverQpResult r =
+      portopt::min_variance_turnover_solve(sig, bad, 0.0, Vector(), Vector(n, 0.3), 0.8);
+  EXPECT_TRUE(r.converged);
+  EXPECT_NEAR(r.turnover, 0.8, 1e-12);
+}
+
+TEST(Turnover, RandomProblemsCertifiedAndNoWorseThanStart) {
+  // Every random problem is certified; the certified optimum is never
+  // worse than the feasible projection of w0 or than the kappa = 0 point.
+  std::mt19937_64 rng(31);
+  std::normal_distribution<double> nd(0.0, 1.0);
+  std::uniform_real_distribution<double> ud(0.0, 1.0);
+  for (int trial = 0; trial < 20; ++trial) {
+    const std::size_t n = 2 + static_cast<std::size_t>(trial % 7);
+    Matrix a(n, n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+      for (std::size_t j = 0; j < n; ++j) a(i, j) = nd(rng);
+    }
+    Matrix sig(n, n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+      for (std::size_t j = 0; j < n; ++j) {
+        double s = 0.0;
+        for (std::size_t k = 0; k < n; ++k) s += a(i, k) * a(j, k);
+        sig(i, j) = s / static_cast<double>(n) + (i == j ? 1e-3 : 0.0);
+      }
+    }
+    Vector mu(n, 0.0);
+    Vector w0(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+      mu[i] = 0.05 + 0.04 * nd(rng);
+      w0[i] = -std::log(ud(rng) + 1e-300);
+    }
+    const double tot = vsum(w0);
+    for (double& v : w0) v /= tot;
+    const double kappa = std::pow(10.0, -4.0 + 3.0 * ud(rng));
+    const double ubv = 1.0 / static_cast<double>(n) + 0.05 + ud(rng) * 0.5;
+    const Vector lb(n, 0.0);
+    const Vector ub(n, ubv);
+    Vector c(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) c[i] = mu[i] / 2.0;
+    const auto obj = [&](const Vector& w) {
+      double l1 = 0.0;
+      for (std::size_t i = 0; i < n; ++i) l1 += std::fabs(w[i] - w0[i]);
+      return 0.5 * variance(w, sig) - portopt::dot(c, w) + kappa * l1;
+    };
+    const portopt::TurnoverQpResult r =
+        portopt::mean_variance_turnover_solve(mu, sig, w0, 2.0, kappa, lb, ub);
+    ASSERT_TRUE(r.converged) << trial << " " << r.kkt_residual;
+    const Vector start = portopt::project_simplex_box(w0, 1.0, lb, ub);
+    EXPECT_LE(obj(r.weights), obj(start) + 1e-12);
+    const portopt::TurnoverQpResult r0 =
+        portopt::mean_variance_turnover_solve(mu, sig, w0, 2.0, 0.0, lb, ub);
+    EXPECT_LE(obj(r.weights), obj(r0.weights) + 1e-12);
+    double to_start = 0.0;
+    for (std::size_t i = 0; i < n; ++i) to_start += std::fabs(start[i] - w0[i]);
+    const portopt::TurnoverQpResult rv =
+        portopt::min_variance_turnover_solve(sig, w0, kappa, lb, ub, to_start + 0.05);
+    EXPECT_TRUE(rv.converged) << trial << " " << rv.kkt_residual;
+    EXPECT_LE(rv.turnover, to_start + 0.05 + 1e-12);
+  }
+}
+
+TEST(Turnover, CertificateRejectsWrongPoints) {
+  const Matrix& sig = testdata::sigma_ann();
+  const std::size_t n = sig.rows();
+  const Vector eq(n, 1.0 / static_cast<double>(n));
+  const double kappa = 1e-3;
+  const portopt::TurnoverQpResult r = portopt::min_variance_turnover_solve(sig, eq, kappa);
+  const Vector& w = r.weights;
+  const Vector lo(n, 0.0);
+  const Vector hi(n, kInf);
+  const Vector c(n, 0.0);
+  std::vector<std::size_t> free_idx;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (w[i] > 1e-9 && std::fabs(w[i] - eq[i]) > 1e-9) free_idx.push_back(i);
+  }
+  ASSERT_GE(free_idx.size(), 2u);
+  const std::size_t i0 = free_idx[0];
+  const double nu =
+      portopt::mat_vec(sig, w)[i0] + kappa * (w[i0] > eq[i0] ? 1.0 : -1.0);
+  auto cert = portopt::detail::turnover_certificate(sig, c, eq, kappa, lo, hi, kInf, nu, 0.0, w);
+  EXPECT_TRUE(cert.certified);
+  EXPECT_LT(cert.residual, 1e-12);
+  cert = portopt::detail::turnover_certificate(sig, c, eq, kappa, lo, hi, kInf, nu * 1.01,
+                                               0.0, w);
+  EXPECT_FALSE(cert.certified);
+  Vector wp(w);
+  wp[free_idx[0]] += 1e-4;
+  wp[free_idx[1]] -= 1e-4;
+  cert = portopt::detail::turnover_certificate(sig, c, eq, kappa, lo, hi, kInf, nu, 0.0, wp);
+  EXPECT_FALSE(cert.certified);
+  cert = portopt::detail::turnover_certificate(sig, c, eq, kappa, lo, hi, 10.0, nu, -1e-3, w);
+  EXPECT_FALSE(cert.certified);
+  cert = portopt::detail::turnover_certificate(sig, c, eq, kappa, lo, hi, 10.0, nu, 1e-3, w);
+  EXPECT_FALSE(cert.certified);
+  EXPECT_EQ(portopt::min_variance_turnover(sig, eq, kappa), w);
+}
+
+TEST(Turnover, ValidationTrivialCasesAndWrappers) {
+  const Matrix& sig = testdata::sigma_ann();
+  const Vector& mu = testdata::mu_ann();
+  const std::size_t n = sig.rows();
+  const Vector eq(n, 1.0 / static_cast<double>(n));
+  EXPECT_THROW(portopt::min_variance_turnover_solve(sig, eq, -1e-3), std::invalid_argument);
+  EXPECT_THROW(portopt::min_variance_turnover_solve(sig, eq, std::nan("")),
+               std::invalid_argument);
+  EXPECT_THROW(portopt::min_variance_turnover_solve(sig, Vector(3, 0.3), 0.0),
+               std::invalid_argument);
+  EXPECT_THROW(portopt::min_variance_turnover_solve(sig, Vector(n, std::nan("")), 0.0),
+               std::invalid_argument);
+  EXPECT_THROW(portopt::min_variance_turnover_solve(sig, eq, 0.0, Vector(), Vector(), -0.1),
+               std::invalid_argument);
+  EXPECT_THROW(portopt::mean_variance_turnover_solve(mu, sig, eq, 0.0, 1e-3),
+               std::invalid_argument);
+  EXPECT_THROW(portopt::min_variance_turnover_solve(sig, eq, 0.0, Vector(), Vector(n, 0.1)),
+               std::invalid_argument);
+  const portopt::TurnoverQpResult one =
+      portopt::min_variance_turnover_solve(Matrix(1, 1, 0.04), Vector{0.3}, 1e-3);
+  EXPECT_TRUE(one.converged);
+  EXPECT_EQ(one.weights, Vector{1.0});
+  EXPECT_NEAR(one.turnover, 0.7, 1e-15);
+  const portopt::TurnoverQpResult a = portopt::mean_variance_turnover_solve(
+      mu, sig, eq, 2.5, 1e-3, Vector(n, 0.02), Vector(n, 0.4));
+  const portopt::TurnoverQpResult b = portopt::mean_variance_turnover_solve(
+      mu, sig, eq, 2.5, 1e-3, Vector(n, 0.02), Vector(n, 0.4));
+  EXPECT_EQ(a.weights, b.weights);
+  EXPECT_EQ(a.iterations, b.iterations);
+  EXPECT_EQ(portopt::mean_variance_turnover(mu, sig, eq, 2.5, 1e-3, Vector(n, 0.02),
+                                            Vector(n, 0.4)),
+            a.weights);
+  const portopt::TurnoverQpResult capped =
+      portopt::min_variance_turnover_solve(sig, eq, 1e-3, Vector(), Vector(), kInf, 2);
+  EXPECT_FALSE(capped.converged);
+  EXPECT_THROW(portopt::min_variance_turnover(sig, eq, 1e-3, Vector(), Vector(), kInf, 2),
+               std::domain_error);
 }

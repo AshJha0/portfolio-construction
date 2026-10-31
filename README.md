@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/AshJha0/portfolio-construction/actions/workflows/ci.yml/badge.svg)](https://github.com/AshJha0/portfolio-construction/actions/workflows/ci.yml)
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
-[![Version 1.2.0](https://img.shields.io/badge/version-1.2.0-informational.svg)](CHANGELOG.md)
+[![Version 1.3.0](https://img.shields.io/badge/version-1.3.0-informational.svg)](CHANGELOG.md)
 
 Markowitz, Black-Litterman and risk parity, written four times: a Python
 reference and ports in C++26, Rust and Java 25.
@@ -22,7 +22,7 @@ We wrote it for two readers. A student can run one command per language,
 read the code next to the guide, and see every number in this page
 reproduced. A reviewer can check that the four implementations agree: every
 algorithm is pinned step by step in [API_SPEC.md](API_SPEC.md), and all four
-test suites check the same 23 golden cases in `data/golden/golden.json`.
+test suites check the same 26 golden cases in `data/golden/golden.json`.
 The Python library depends only on numpy, and the ports call no numerical
 library at all (no BLAS, LAPACK or solver); the Rust crate's only
 dependencies are serde and serde_json, for reading the data files.
@@ -81,7 +81,7 @@ cd portfolio-construction
 
 ```bash
 python -m pip install -e "python[dev]"   # numpy; pytest, scipy, ruff, mypy for development
-pytest -q python                         # 114 tests, including the golden suite
+pytest -q python                         # 349 tests at 1.3.0, including the golden suite
 python python/demo.py                    # end-to-end demo
 ```
 
@@ -137,11 +137,15 @@ Python names; the ports use the same names in each language's casing
 | Moments | `sample_mean`, `sample_cov`, `annualize_mean`, `annualize_cov` | mean divides by T, covariance by T-1; correctly rounded sums; annualise by `periods` (default 252) |
 | Shrinkage | `shrink_covariance` | Ledoit-Wolf (2004) constant-correlation target, intensity per Appendix B and the authors' `covCor.m` |
 | Linear algebra | `cholesky`, `chol_solve`, `spd_solve`, `spd_inverse` | Cholesky-Banachiewicz, relative pivot gate 1e-13; every inverse is two triangular solves |
-| Closed-form Markowitz | `two_fund_scalars`, `min_variance_weights`, `tangency_weights`, `frontier_weights`, `efficient_frontier`, `gross_leverage` | A, B, C, D scalars; 25-point grid; `TangencyUndefinedError` when rf is at or above A/C, or within a relative 1e-6 of it |
+| Closed-form Markowitz | `two_fund_scalars`, `min_variance_weights`, `tangency_weights`, `frontier_weights`, `efficient_frontier`, `gross_leverage` | A, B, C, D scalars; 25-point grid; `TangencyUndefinedError` when rf is at or above A/C, or when the tangency's gross leverage exceeds `max_leverage` (default 10) |
 | Constrained Markowitz | `project_simplex_box`, `attainable_return_range`, `min_variance_longonly[_solve]`, `constrained_frontier[_solve, _weights]` | sort-based box-simplex projection; Goldfarb-Idnani dual active-set QP with a KKT residual; the `_solve` forms return `QpResult`, the weights-only forms raise if not certified |
+| Cost-aware Markowitz | `min_variance_turnover[_solve]`, `mean_variance_turnover[_solve]` | `kappa * sum|w - w0|` turnover penalty and optional turnover cap over the box-simplex; buy/sell split solved exactly by the same dual active-set QP; KKT certificate of the nonsmooth problem; `_solve` forms return `TurnoverQpResult` with the turnover |
 | Black-Litterman | `implied_equilibrium_returns`, `views_to_matrices`, `default_omega`, `bl_posterior`, `bl_weights` | reverse optimisation; absolute and relative views; He-Litterman Omega scaled by per-view confidence; one k-by-k Cholesky solve |
 | Risk parity | `risk_contributions`, `erc_weights`, `risk_budget_solve`, `risk_budget_weights`, `inverse_vol_weights` | cyclical coordinate descent on Spinu's log-barrier form, tol 1e-10, at most 10,000 sweeps |
 | Backtest | `rebalance_indices`, `run_backtest`, `annualized_return`, `annualized_vol`, `sharpe_ratio`, `max_drawdown` | expanding window 500 rows, re-estimate every 63 rows, L1 turnover between target vectors |
+| Research layer (Python only, not pinned) | `portopt.research`: `run_backtest_net`, `run_schedule_net`, `walk_forward`; `ewma_covariance`, `ledoit_wolf_identity`, `nonlinear_shrinkage`, `pca_factor_covariance`, `bayes_stein_mean`; `vol_target`, `min_variance_longonly_with`, `erc_with`, `tangency_capped`; `sharpe_se_*`, `deflated_sharpe_ratio`, `sharpe_difference_test` | drifted weights and costs on traded notional, bands, partial rebalancing, volatility targeting with a chosen estimator; no golden values |
+| Signals (Python only, not pinned) | `portopt.research.signals`: `momentum_12_1`, `tsmom`, `short_term_reversal`, `low_volatility`, `low_beta`, `zscore`, `combine`, `signal_to_expected_returns`, `rank_top_tercile`, `SignalMeanVariance`, `signal_black_litterman` | month = 21 rows, year = 252; alphas `IC * sigma * z` with IC assumed; no weight fitted to returns |
+| Real data (Python only) | `portopt.research.data.load_returns`, `scripts/fetch_data.py`, `data/real/registry.json` | Kenneth French files fetched at run time, checked against SHA-256 vintages, never committed; holdout refused without a registered study |
 
 ## Demo output
 
@@ -183,15 +187,31 @@ w ERC            0.0579   0.0568   0.0620   0.0617   0.0444   0.4037   0.1756   
 RC ERC           0.1250   0.1250   0.1250   0.1250   0.1250   0.1250   0.1250   0.1250
 RC spread: ERC 1.30e-12, inv-vol 1.20e-01
 
+=== Cost-aware rebalancing: long-only min variance from market weights
+objective 1/2 w'Sw + kappa*sum|w - w0|, w0 = market weights, kappa in variance units
+     kappa  turnover      vol  certified
+  0.000000    1.2430   0.0404        yes
+  0.000030    1.1319   0.0404        yes
+  0.000100    1.0379   0.0405        yes
+  0.000300    0.9877   0.0407        yes
+  0.001000    0.8253   0.0432        yes
+kappa 0 with turnover cap 0.25: turnover 0.2500, vol 0.0719
+                  US_EQ    EU_EQ    JP_EQ    UK_EQ    EM_EQ  US_BOND  IG_CORP FX_CARRY
+w market         0.2479   0.1653   0.0661   0.0496   0.0579   0.2066   0.1240   0.0826
+w kappa 1e-4     0.0285   0.0000   0.0168   0.0226   0.0000   0.6463   0.1240   0.1619
+w cap 0.25       0.1943   0.1518   0.0661   0.0496   0.0000   0.3316   0.1240   0.0826
+
 === Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)
 method          ann ret  ann vol   sharpe   max DD  avg turno
 equal_weight     0.0614   0.0930   0.4454   0.1868     0.0000
 min_var_lo       0.0479   0.0402   0.6948   0.0589     0.0273
-tangency         0.4835   0.5749   0.8062   0.4700    18.1968
+min_var_tc       0.0479   0.0403   0.6930   0.0586     0.0102
+tangency         0.0493   0.0397   0.7382   0.0523     0.0372
 black_litt       0.0701   0.1070   0.4687   0.2331     0.0174
 erc              0.0528   0.0516   0.6365   0.1019     0.0051
 inverse_vol      0.0564   0.0630   0.5783   0.1235     0.0043
-note: tangency undefined/ill-conditioned at 8 rebalance date(s) (rf at or above the min-var return); fell back to min-variance there.
+note: tangency fell back to min-variance at 12 rebalance date(s): 8 with rf at or above the min-var return A/C, 4 above the 10x gross-leverage cap.
+min_var_tc = min_var_lo with turnover penalty kappa = 3e-5 against the previous target.
 ```
 
 ### What the backtest section measures
@@ -212,19 +232,87 @@ consecutive *targets*. The drift between targets is never traded or
 counted, and no transaction cost is charged anywhere.
 
 Worked example: T = 1250 gives dates 500, 563, ..., 1193, which is 12
-re-estimations and 11 turnover values over a 750-day holdout. The tangency
-row's average turnover of 18.2 means the target moved by 18 times NAV, on
-average, at each of those 11 dates. A real desk could not trade that, and
-the tangency row's 48% return should be read with that in mind and with
-the synthetic data in mind.
+re-estimations and 11 turnover values over a 750-day holdout. The
+tangency row equals unconstrained min variance, because the rule falls
+back at all 12 dates: at 8 rf is at or above `A/C`, and at 4 the tangency
+would exceed the 10x gross-leverage cap (`TANGENCY_MAX_LEVERAGE`,
+API_SPEC 3.3). Version 1.2.0 accepted those four portfolios, at 15x to
+94x gross leverage, and reported an average turnover of 18.2 for this
+row (LEARN 7.3; COOKBOOK 18 reproduces it with `max_leverage=math.inf`).
+That change in default behaviour is the one breaking change in 1.3.0.
+
+## Results
+
+**Synthetic study.** 144 configurations of 12 rules on the bundled data,
+net of 0 to 25 bp: no difference between rules is statistically
+meaningful (largest DSR 0.58, smallest paired p-value against equal
+weight 0.15). The data has constant drifts, so this checks the
+instruments, not any rule
+([docs/results/cost_aware_allocation.md](docs/results/cost_aware_allocation.md); measured).
+
+**Real-data development period, 1926 to 2015.** 10 and 49 Kenneth French
+industry portfolios, monthly rebalancing, 10 bp assumed cost, 206
+registered configurations. 1/N earned a net Sharpe of 0.47 on 10
+industries; most rules landed within 0.05 of it. Volatility targeting
+gained 0.13 (p = 0.02), almost all in 1928-1969; long-only min variance
+gained 0.15 on 49 industries (p = 0.15) at two thirds of the volatility;
+EWMA covariance lost; the uncapped tangency rule lost all its capital in
+1929
+([docs/results/real_data_study_dev.md](docs/results/real_data_study_dev.md); measured).
+
+**Pre-registered holdout, 2016-01 to 2026-09: a negative result.** Six
+hypotheses were registered before the holdout was read
+([docs/results/real_data_preregistration.md](docs/results/real_data_preregistration.md)).
+None is supported: every Holm-adjusted p-value is 1.00 and all six
+differences have the wrong sign. Volatility-targeted 1/N trailed 1/N by
+0.19 of Sharpe, min variance on 49 industries by 0.15 (with volatility
+cut from 18.2% to 14.0%), capped tangency by 0.40. The market (0.73) beat
+1/N (0.67 and 0.64). The tests had power of only 0.04 to 0.28, so this
+does not show the levers are worthless; it shows their development gains
+were too small and too regime-dependent to rely on
+([docs/results/real_data_study.md](docs/results/real_data_study.md); measured).
+
+**Signals: historical evidence for momentum before 2016 only, no edge established after costs and correction, being tracked forward.** `portopt.research.signals`
+provides 12-1 momentum, time-series momentum, short-term reversal, low
+volatility and low beta, a combiner, `IC * sigma * z` alphas,
+Black-Litterman views, rank portfolios and turnover-QP sizing. None of
+four registered hypotheses is supported (Holm p 0.77 to 0.92). Momentum
+improved on 1/N in development (+0.10 to +0.11, one-sided p 0.01 to
+0.03) and kept a small positive sign in 2016-2026, within one standard
+error and below the market. Low volatility reversed; short-term reversal
+lost about 0.3 of Sharpe in every sub-period. 2016-2026 was a seen
+period for this study, not a clean holdout, and its registration was
+recorded locally before the run but not pushed first
+([docs/results/signal_study.md](docs/results/signal_study.md); measured).
+
+**Benchmarks.** On one non-idle laptop, at n = 8 the long-only QP takes
+about 8 us in C++, Rust and Java and 460 us in Python; at n = 50, 2.9 to
+5.7 ms against 830 ms. Gaps below about 2x between languages are not
+meaningful
+([docs/results/benchmarks.md](docs/results/benchmarks.md); measured).
+
+## Forward paper portfolio
+
+[`forward/`](forward/README.md) keeps a monthly log of four frozen rules:
+long-only min variance with Ledoit-Wolf constant-correlation covariance
+on 10 and 49 industries (frozen before the holdout was read), and
+Black-Litterman with momentum views on 10 industries and the momentum
+top tercile on 49 (study `r2-forward-signals-v1`), all at 10 bp. It is
+hypothetical: the series are non-investable research indices, costs are
+assumed, no real money is involved, and it is not investment advice. A
+scheduled workflow (`.github/workflows/forward.yml`) appends one month at
+a time from 2026-11, and the results are published whatever they are.
+It is the only evidence in this repository that nothing could have been
+fitted to.
 
 ## What this is not
 
 - **Not a source of investment results.** The data is simulated (above).
   None of the backtest numbers say anything about markets.
-- **Not a realistic backtest.** No transaction costs, no drift between
-  re-estimations, no calendar, no benchmark statistics, no Sharpe standard
-  error (`python/src/portopt/backtest.py`).
+- **Not a realistic backtest in the pinned core.** The four-language
+  backtest has no transaction costs and no drift between re-estimations
+  (`python/src/portopt/backtest.py`). The Python research layer adds both
+  (`portopt.research.run_backtest_net`).
 - **Not a large-scale optimiser.** Linear algebra is dense with an O(n^3)
   Cholesky per solve, and the QP refactors its working set every iteration.
   We size it for n up to about 20 assets.
@@ -282,8 +370,9 @@ generator draws random numbers.
   `(weights, sweeps, converged)`; `erc_weights` and `risk_budget_weights`
   return the weights only and do not raise at the sweep cap, so call
   `risk_budget_solve` when you need to know.
-- **Leverage.** Unconstrained tangency and Black-Litterman weights are not
-  bounded. Check `gross_leverage` (4.14 for the demo tangency).
+- **Leverage.** `tangency_weights` raises above `max_leverage` (default
+  10); Black-Litterman weights are not bounded. Check `gross_leverage`
+  (4.14 for the demo tangency).
 
 ## Repository layout
 
@@ -291,7 +380,10 @@ generator draws random numbers.
 README.md, LEARN.md, COOKBOOK.md, API_SPEC.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md
 docs/       index.html (the Pages site), ARCHITECTURE.md, diagrams/, make_figures.py, img/
 data/       asset_returns.csv, market_caps.csv, views.json, config.json,
-            generate_data.py, golden/golden.json
+            generate_data.py, golden/golden.json, real/ (README, manifest, registry)
+docs/results/  study results, pre-registration, benchmarks
+forward/    run_forward.py, rules/, README.md (monthly paper log)
+scripts/    fetch_data.py
 python/     pyproject.toml, src/portopt/, tests/, demo.py
 cpp/        CMakeLists.txt, include/portopt/, src/, tests/
 rust/       Cargo.toml, src/, src/bin/demo.rs, tests/
@@ -300,27 +392,23 @@ java/       pom.xml, src/main/java/com/quant/portopt/, src/test/java/...
 
 ## Project status
 
-Version 1.2.0. Every change is recorded in [CHANGELOG.md](CHANGELOG.md).
-Fixed in 1.2.0, from the 2026-10-31 review:
-
-- the risk-parity weight wrappers now raise when the solver stops without
-  converging, in all four languages, as the QP wrappers already did;
-- the QP certificate now also checks dual feasibility (no active bound
-  carries a negative multiplier beyond tolerance), in all four languages;
-- a Python-only research layer (`portopt.research`) adds a backtest with
-  costs and weight drift, Sharpe standard errors, PSR, DSR and paired
-  tests; results are in
-  [docs/results/cost_aware_allocation.md](docs/results/cost_aware_allocation.md).
+Version 1.3.0. Every change is recorded in [CHANGELOG.md](CHANGELOG.md).
+New in 1.3.0: the tangency leverage cap, the cost-aware turnover QP in
+all four languages (three new golden cases), estimators and weight rules
+in the research layer, real data with a frozen holdout, a forward paper
+log, return signals (`portopt.research.signals`), and kernel benchmarks.
 
 Still open:
 
 - costs and drift in the pinned four-language backtest (today only the
   Python research layer has them);
-- a solver that scales past a few dozen assets (incremental active-set
-  updates, flat storage, benchmarks);
-- property-based tests and full-matrix golden checks;
-- a real-data adapter with a frozen holdout, without which no result here
-  says anything about real markets.
+- a solver that scales past a few dozen assets (the n = 49 study used a
+  separate primal active-set solver in `python/studies/real_data_engine.py`);
+- known issues: `mean_variance_turnover_solve` can take minutes on some
+  n = 49 problems, and the Python QP is slow at n = 49 generally; the
+  forward runner cannot run path-dependent rules (volatility targeting,
+  partial rebalancing) and passes total returns, so time-series momentum
+  uses rf = 0 there.
 
 ## References
 

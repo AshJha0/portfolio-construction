@@ -36,9 +36,10 @@ from .estimators import (
 from .linalg import chol_solve, cholesky, spd_inverse, spd_solve
 from .markowitz import (
     QP_MAX_ITER,
-    TANGENCY_COND_RTOL,
+    TANGENCY_MAX_LEVERAGE,
     QpResult,
     TangencyUndefinedError,
+    TurnoverQpResult,
     TwoFundScalars,
     attainable_return_range,
     constrained_frontier,
@@ -47,8 +48,12 @@ from .markowitz import (
     efficient_frontier,
     frontier_weights,
     gross_leverage,
+    mean_variance_turnover,
+    mean_variance_turnover_solve,
     min_variance_longonly,
     min_variance_longonly_solve,
+    min_variance_turnover,
+    min_variance_turnover_solve,
     min_variance_weights,
     project_simplex_box,
     tangency_weights,
@@ -62,7 +67,7 @@ from .risk_parity import (
     risk_contributions,
 )
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "cholesky",
@@ -77,9 +82,10 @@ __all__ = [
     "shrink_covariance",
     "validate_returns",
     "QP_MAX_ITER",
-    "TANGENCY_COND_RTOL",
+    "TANGENCY_MAX_LEVERAGE",
     "QpResult",
     "TangencyUndefinedError",
+    "TurnoverQpResult",
     "TwoFundScalars",
     "attainable_return_range",
     "constrained_frontier",
@@ -88,8 +94,12 @@ __all__ = [
     "efficient_frontier",
     "frontier_weights",
     "gross_leverage",
+    "mean_variance_turnover",
+    "mean_variance_turnover_solve",
     "min_variance_longonly",
     "min_variance_longonly_solve",
+    "min_variance_turnover",
+    "min_variance_turnover_solve",
     "min_variance_weights",
     "project_simplex_box",
     "tangency_weights",

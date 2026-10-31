@@ -7,7 +7,7 @@ Deterministic: numpy default_rng(seed=42).  Writes
     market_caps.csv     market caps for the reverse-optimization weights
     views.json          example absolute + relative Black-Litterman views
     config.json         shared configuration constants
-    golden/golden.json  23 named cross-language golden cases
+    golden/golden.json  26 named cross-language golden cases
 
 Golden values are computed by the portopt reference implementation from
 the CSV *as written* (values are re-read from disk so that every language
@@ -15,8 +15,9 @@ consuming the file reproduces them exactly).  The script also validates:
 closed-form solutions against numpy.linalg.lstsq, the Ledoit-Wolf
 intensity against a direct transcription of the authors' covCor.m, the
 active-set QP solutions against scipy SLSQP and their KKT certificates,
-ERC risk contributions equality, and the BL limits tau -> 0 and
-Omega -> inf.
+ERC risk contributions equality, the BL limits tau -> 0 and
+Omega -> inf, and the cost-aware QP cases against SLSQP on the split
+formulation (w, b, s).
 """
 
 from __future__ import annotations
@@ -67,6 +68,10 @@ FRONTIER_TARGET = 0.08
 BOX_LB, BOX_UB = 0.02, 0.40
 BOX_TARGET = 0.06
 RB_BUDGETS = [0.20, 0.20, 0.15, 0.15, 0.10, 0.10, 0.05, 0.05]
+# Cost-aware QP cases (API_SPEC 3.7): turnover penalty kappa in variance
+# units, a binding turnover cap, and a mean-variance case at gamma = DELTA.
+TC_KAPPA = 1.0e-3
+TC_CAP_KAPPA, TC_CAP = 1.0e-4, 0.5
 
 VIEWS = [
     {"type": "absolute", "asset": "EM_EQ", "q": 0.10, "confidence": 1.0},
@@ -286,6 +291,62 @@ def main() -> None:
     bt_erc = po.run_backtest(x, erc_fn, rf=RF, window=WINDOW, step=STEP)
     bt_mv = po.run_backtest(x, mv_lo_fn, rf=RF, window=WINDOW, step=STEP)
 
+    # ------------------------------------------------------- cost-aware QP cases
+    w_eq = np.full(N, 1.0 / N)
+    tc_l1 = po.min_variance_turnover_solve(sig, w_eq, TC_KAPPA)
+    tc_cap = po.min_variance_turnover_solve(sig, w_eq, TC_CAP_KAPPA, max_turnover=TC_CAP)
+    tc_mv = po.mean_variance_turnover_solve(mu, sig, w_mkt, DELTA, TC_KAPPA, lb=BOX_LB, ub=BOX_UB)
+    tc_zero = po.min_variance_turnover_solve(sig, w_eq, 0.0)
+    assert np.max(np.abs(tc_zero.weights - w_mv_lo)) < 1e-12, "kappa = 0 vs long-only QP"
+    for name, r in (("l1", tc_l1), ("cap", tc_cap), ("mv", tc_mv), ("zero", tc_zero)):
+        assert r.converged and r.kkt_residual < 1e-12, (
+            f"turnover {name}: not certified ({r.kkt_residual:.2e})"
+        )
+    assert abs(tc_cap.turnover - TC_CAP) < 1e-12, "turnover cap should bind"
+
+    def slsqp_split(c_lin, w_start, kappa, lb, ub, cap):
+        # min 0.5 w'Sw - c'w + kappa 1'(b + s), w - b + s = w0, b, s >= 0
+        def obj(z):
+            w, b, s_ = z[:N], z[N : 2 * N], z[2 * N :]
+            return 0.5 * w @ sig @ w - c_lin @ w + kappa * (b.sum() + s_.sum())
+
+        def jac(z):
+            return np.concatenate([sig @ z[:N] - c_lin, np.full(2 * N, kappa)])
+
+        cons = [
+            {"type": "eq", "fun": lambda z: z[:N].sum() - 1.0},
+            {"type": "eq", "fun": lambda z: z[:N] - z[N : 2 * N] + z[2 * N :] - w_start},
+        ]
+        if cap is not None:
+            cons.append({"type": "ineq", "fun": lambda z: cap - z[N:].sum()})
+        z0 = np.concatenate([w_start, np.zeros(2 * N)])
+        bounds = [(lb, None if ub == np.inf else ub)] * N + [(0.0, None)] * (2 * N)
+        r = minimize(
+            obj,
+            z0,
+            jac=jac,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=cons,
+            options={"ftol": 1e-16, "maxiter": 2000},
+        )
+        assert r.success, r.message
+        return r.x[:N], obj(r.x)
+
+    def tc_objective(w, c_lin, w_start, kappa):
+        return 0.5 * w @ sig @ w - c_lin @ w + kappa * np.abs(w - w_start).sum()
+
+    for name, r, c_lin, w_start, kappa, lb, ub, cap in (
+        ("minvar_turnover_l1", tc_l1, np.zeros(N), w_eq, TC_KAPPA, 0.0, np.inf, None),
+        ("minvar_turnover_capped", tc_cap, np.zeros(N), w_eq, TC_CAP_KAPPA, 0.0, np.inf, TC_CAP),
+        ("meanvar_turnover_box", tc_mv, mu / DELTA, w_mkt, TC_KAPPA, BOX_LB, BOX_UB, None),
+    ):
+        w_ref, f_ref = slsqp_split(c_lin, w_start, kappa, lb, ub, cap)
+        f_qp = tc_objective(r.weights, c_lin, w_start, kappa)
+        assert f_qp <= f_ref + 1e-12, f"{name}: QP worse than SLSQP ({f_qp} > {f_ref})"
+        assert np.max(np.abs(r.weights - w_ref)) < 1e-5, f"{name}: QP differs from SLSQP"
+    print("validated: cost-aware QP vs scipy SLSQP on the split problem (3 problems)")
+
     # ---------------------------------------------------------------- golden cases
     cases = []
     cases.append(
@@ -485,6 +546,49 @@ def main() -> None:
                 "n_rebalances": float(len(bt_mv.rebalance_dates)),
             },
             1e-9,
+        )
+    )
+
+    cases.append(
+        case(
+            "minvar_turnover_l1",
+            {**wdict("w0", w_eq), "kappa": TC_KAPPA},
+            {
+                **wdict("w", tc_l1.weights),
+                "turnover": tc_l1.turnover,
+                "variance": float(tc_l1.weights @ sig @ tc_l1.weights),
+            },
+            1e-10,
+        )
+    )
+    cases.append(
+        case(
+            "minvar_turnover_capped",
+            {**wdict("w0", w_eq), "kappa": TC_CAP_KAPPA, "max_turnover": TC_CAP},
+            {
+                **wdict("w", tc_cap.weights),
+                "turnover": tc_cap.turnover,
+                "variance": float(tc_cap.weights @ sig @ tc_cap.weights),
+            },
+            1e-10,
+        )
+    )
+    cases.append(
+        case(
+            "meanvar_turnover_box",
+            {
+                **wdict("w0", w_mkt),
+                "risk_aversion": DELTA,
+                "kappa": TC_KAPPA,
+                "lb": BOX_LB,
+                "ub": BOX_UB,
+            },
+            {
+                **wdict("w", tc_mv.weights),
+                "turnover": tc_mv.turnover,
+                "variance": float(tc_mv.weights @ sig @ tc_mv.weights),
+            },
+            1e-10,
         )
     )
 

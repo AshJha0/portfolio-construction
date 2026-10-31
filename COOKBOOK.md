@@ -1,7 +1,7 @@
 # COOKBOOK: portopt recipes
 
 Task-oriented recipes. Recipes 1 to 12 are given in all four languages;
-recipes 13 to 18 are Python only.
+recipes 13 to 25 are Python only.
 
 **Python.** Every Python block is standalone: it starts with its own
 imports and data loading and runs as written from the `python/`
@@ -9,8 +9,9 @@ directory. Install once from the repository root with
 `pip install -e "python[dev]"`, then `cd python` and run a block with
 `python recipe.py`; without installing, use `PYTHONPATH=src python
 recipe.py` from `python/`. Data paths are relative to `python/`. All
-eighteen Python blocks were extracted and run this way for this
-revision; the expected values in the comments are what they printed.
+Python blocks except recipe 23 (which needs a network fetch) were
+extracted and run this way for this revision; the expected values in
+the comments are what they printed.
 
 **C++, Rust, Java.** These snippets are fragments of one program per
 language: the preamble in recipe 1 declares `x`, `mu`, `sigma`, `names`,
@@ -219,7 +220,7 @@ mu = po.annualize_mean(po.sample_mean(x))
 sigma = po.annualize_cov(po.sample_cov(x))
 
 w_mv = po.min_variance_weights(sigma)         # S^-1 1 / C
-w_tan = po.tangency_weights(mu, sigma, 0.02)  # TangencyUndefinedError if rf >= A/C (or within 1e-6 of it)
+w_tan = po.tangency_weights(mu, sigma, 0.02)  # TangencyUndefinedError if rf >= A/C or gross leverage > 10 (recipe 20)
 print(round(po.gross_leverage(w_tan), 2))     # 4.14: cap this before it reaches an order system
 sc = po.two_fund_scalars(mu, sigma)
 print(sc.a / sc.c)                            # min-variance return 0.0322349717...
@@ -956,7 +957,7 @@ def tangency_fn(h):
     m = po.annualize_mean(po.sample_mean(h))
     sc = po.two_fund_scalars(m, s)
     try:
-        w = po.tangency_weights(m, s, rf)
+        w = po.tangency_weights(m, s, rf, max_leverage=math.inf)  # the 1.2.0 behaviour
         log.append((h.shape[0], "tangency", sc.a / sc.c, po.gross_leverage(w)))
         return w
     except po.TangencyUndefinedError:
@@ -996,6 +997,12 @@ for t_k, kind, gmv_ret, lev in log:
 # 500 .. 941: fallback (A/C below 0.02); 1004 tangency A/C=0.02073 gross=93.6; 1067 gross=28.8; ...
 ```
 
+The tangency rule here passes `max_leverage=math.inf`, which reproduces
+the 1.2.0 behaviour; with the 1.3.0 default cap of 10 it falls back to
+min variance at all 12 dates, as in the demo. The uncapped run is kept
+because it shows what the cap prevents: 93.6x gross leverage at the 1004
+rebalance and 200 units of target turnover in 11 rebalances.
+
 The standard error is about `sqrt(252 / 750) = 0.58` for every method,
 so no Sharpe difference in the demo table is distinguishable from zero.
 The linear cost model is an assumption; LEARN section 7.3 discusses what
@@ -1004,3 +1011,272 @@ with no-trade bands, volatility targeting, PSR, DSR and a block
 bootstrap, use the Python-only research layer `portopt.research`
 (`run_backtest_net`, `research/stats.py`); its study is in
 `docs/results/cost_aware_allocation.md`.
+
+---
+
+## 19. How do I rebalance with a turnover penalty or a turnover cap?
+
+Python only (the solver exists in all four ports, API_SPEC 3.7). The
+plain idea: when moving from the current holdings `w0` to a new
+minimum-variance portfolio costs money, add the cost to the objective,
+`1/2 w'Sw + kappa * sum|w - w0|`, or bound the trade outright. The
+solver splits the trade into buys and sells, `w = w0 + b - s`, solves
+the resulting smooth QP exactly, and certifies the KKT conditions of the
+original nonsmooth problem [derived: API_SPEC 3.7]. `kappa` is in
+variance units; a cost rate `c` against a risk aversion `gamma` maps to
+`kappa = c / gamma`.
+
+```python
+import numpy as np
+import portopt as po
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+sigma = po.annualize_cov(po.sample_cov(x))
+w0 = np.loadtxt("../data/market_caps.csv", delimiter=",", skiprows=1, usecols=1)
+w0 = w0 / w0.sum()                                  # current holdings: market weights
+
+for kappa in (0.0, 1e-4, 1e-3):
+    res = po.min_variance_turnover_solve(sigma, w0, kappa)
+    vol = float(np.sqrt(res.weights @ sigma @ res.weights))
+    print(f"kappa {kappa:g}: turnover {res.turnover:.4f} vol {vol:.4f} "
+          f"certified {res.converged} kkt {res.kkt_residual:.1e}")
+
+capped = po.min_variance_turnover_solve(sigma, w0, 0.0, max_turnover=0.25)
+print(f"cap 0.25: turnover {capped.turnover:.4f}")
+# kappa 0: turnover 1.2430 vol 0.0404 certified True kkt 2.2e-19
+# kappa 0.0001: turnover 1.0379 vol 0.0405 certified True kkt 6.9e-19
+# kappa 0.001: turnover 0.8253 vol 0.0432 certified True kkt 4.3e-19
+# cap 0.25: turnover 0.2500
+```
+
+The same figures appear in the demo's cost-aware section [measured:
+`python python/demo.py`]. `min_variance_turnover` and
+`mean_variance_turnover` return the weights only and raise when the
+certificate fails; the `_solve` forms return `TurnoverQpResult` with
+`turnover`, `converged` and `kkt_residual`. A cap below the smallest
+attainable turnover raises.
+
+---
+
+## 20. How does the tangency leverage cap work?
+
+Python only. The tangency weights are `S^-1 (mu - rf 1) / (A - rf C)`,
+so they grow without bound as rf approaches the min-variance return
+`A/C` from below. Since 1.3.0 `tangency_weights` raises
+`TangencyUndefinedError` when the gross leverage of the result exceeds
+`max_leverage`, default `TANGENCY_MAX_LEVERAGE = 10`; `math.inf` turns
+the cap off [derived: API_SPEC 3.3]. The history below is the one the
+backtest sees at its 1004 rebalance.
+
+```python
+import math
+
+import numpy as np
+import portopt as po
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+h = x[:1004]                                        # the history at the 1004 rebalance
+mu = po.annualize_mean(po.sample_mean(h))
+sigma = po.annualize_cov(po.sample_cov(h))
+sc = po.two_fund_scalars(mu, sigma)
+print(f"A/C = {sc.a / sc.c:.5f}, rf = 0.02")
+
+w_raw = po.tangency_weights(mu, sigma, 0.02, max_leverage=math.inf)
+print(f"uncapped gross leverage {po.gross_leverage(w_raw):.1f}")
+try:
+    po.tangency_weights(mu, sigma, 0.02)            # default cap TANGENCY_MAX_LEVERAGE = 10
+except po.TangencyUndefinedError as e:
+    print("default cap:", str(e)[:60])
+print(po.TANGENCY_MAX_LEVERAGE)
+# A/C = 0.02073, rf = 0.02
+# uncapped gross leverage 93.6
+# default cap: tangency ill-conditioned: gross leverage 93.56 exceeds max_l
+# 10.0
+```
+
+A gap of 0.07 percentage points between rf and `A/C` produced 93.6x
+gross leverage [measured: this recipe]. Version 1.2.0 accepted it,
+because its guard only rejected gaps below one part per million.
+Callers that cap leverage themselves (for example
+`portopt.research.tangency_capped`, which blends toward minimum
+variance) pass `max_leverage=math.inf` and apply their own rule.
+
+---
+
+## 21. How do EWMA and sample covariances compare for long-only min variance?
+
+Python only, research layer. Both rules are long-only minimum variance
+with the expanding window and 63-day step of the pinned schedule, net of
+10 bp per unit of traded notional, with weights drifting between
+rebalances (`run_backtest_net`). The EWMA estimator uses a half-life of
+22.8 days (decay 0.97).
+
+```python
+import numpy as np
+import portopt as po
+from portopt.research import (
+    ewma_estimator,
+    min_variance_longonly_with,
+    run_backtest_net,
+    sample_estimator,
+)
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+for est in (sample_estimator(), ewma_estimator(half_life=22.8)):
+    res = run_backtest_net(x, min_variance_longonly_with(est), cost_bps=10, rf=0.02)
+    print(f"{est.name:<12} SR {res.sharpe:.3f} vol {res.ann_vol:.4f} "
+          f"turnover/yr {res.annual_turnover:.2f} cost/yr {res.ann_cost:.4%}")
+# sample       SR 0.682 vol 0.0402 turnover/yr 0.15 cost/yr 0.0484%
+# ewma22.8     SR 0.582 vol 0.0408 turnover/yr 1.11 cost/yr 0.1448%
+```
+
+EWMA trades about seven times as much and does not lower volatility
+[measured: this recipe, synthetic data]. The synthetic returns have
+constant volatility, so a fast estimator has nothing to track. On the
+real industry data EWMA also lost, by 0.06 to 0.13 of Sharpe against
+the sample covariance [measured: `docs/results/real_data_study_dev.md`,
+covariance estimators table]. With a Sharpe standard error of about 0.58
+on 750 days (recipe 18), the synthetic difference is noise.
+
+---
+
+## 22. How do I target volatility with a chosen covariance estimator?
+
+Python only, research layer. `run_backtest_net(vol_target=...)` scales
+the target at each rebalance by `s = target / sqrt(u' Sigma u)`, caps
+`s * sum|u|` at `max_gross`, and holds the rest in cash. Sigma is the
+annualized sample covariance of the history unless `vol_estimator`
+supplies another one.
+
+```python
+import numpy as np
+import portopt as po
+from portopt.research import ewma_estimator, run_backtest_net
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+ew = lambda h: np.full(h.shape[1], 1.0 / h.shape[1])
+
+plain = run_backtest_net(x, ew, cost_bps=10, rf=0.02)
+print(f"1/N            SR {plain.sharpe:.3f} vol {plain.ann_vol:.4f}")
+for label, est in (("sample", None), ("EWMA hl 22.8", ewma_estimator(half_life=22.8))):
+    res = run_backtest_net(x, ew, cost_bps=10, rf=0.02, vol_target=0.10,
+                           max_gross=1.5, vol_estimator=est)
+    print(f"1/N @10% {label:<13} SR {res.sharpe:.3f} vol {res.ann_vol:.4f} "
+          f"scales {np.round(res.scales[:3], 3)}")
+# 1/N            SR 0.450 vol 0.0931
+# 1/N @10% sample        SR 0.492 vol 0.0923 scales [0.951 0.958 0.968]
+# 1/N @10% EWMA hl 22.8  SR 0.559 vol 0.1005 scales [0.871 0.987 1.063]
+```
+
+On synthetic data with constant volatility none of these differences is
+distinguishable from zero [measured: this recipe; derived: standard
+error 0.58]. On the real 10-industry data, 1/N scaled to 10% with the
+sample covariance gained 0.13 of Sharpe over plain 1/N (p = 0.02), almost
+all of it in 1928-1969 [measured: `docs/results/real_data_study_dev.md`].
+
+---
+
+## 23. How do I load the real Kenneth French data?
+
+Python only, research layer. **Needs a network fetch and is not run in
+CI.** The data are research index portfolios from the Kenneth R. French
+Data Library; they are downloaded at run time, checked against the
+SHA-256 vintages in `data/real/manifest.json`, and never committed
+(`data/real/README.md`). The series are not investable.
+
+First fetch from the repository root:
+
+```bash
+python scripts/fetch_data.py ind10_vw_daily ff3_daily
+```
+
+Then, from `python/`:
+
+```python
+import numpy as np
+from portopt.research import data, min_variance_longonly_with, run_backtest_net
+from portopt.research import lw_constant_corr_estimator
+
+panel = data.load_returns("ind10_vw_daily")        # period="development": before 2016-01-01
+print(panel.columns, panel.dates[0], panel.dates[-1], panel.values.shape)
+print(panel.vintage_id, panel.zip_sha256[:16])
+
+rule = min_variance_longonly_with(lw_constant_corr_estimator())
+res = run_backtest_net(panel.values, rule, window=504, step=21, cost_bps=10)
+print(res.sharpe, res.annual_turnover)
+
+try:
+    data.load_returns("ind10_vw_daily", period="holdout")  # no registered study
+except data.HoldoutAccessError as e:
+    print(e)
+```
+
+`period="holdout"` and `period="all"` raise `HoldoutAccessError` unless
+`study_id` names a study in `data/real/registry.json`
+[derived: `research/data.py::load_returns`]. This block was not run for
+this revision, so it carries no expected output; the study script
+`python/studies/real_data_study.py` uses a calendar schedule rather than
+the 21-row step shown here, so its numbers differ.
+
+---
+
+## 24. How do I compute 12-1 momentum and its z-scores?
+
+Python only, research layer (`portopt.research.signals`). The plain
+idea: an asset's compound return over the last twelve months, skipping
+the most recent one, is a score; higher is taken to mean a higher
+expected return [cited: Jegadeesh and Titman 1993]. A "month" is 21
+rows and a "year" 252, counted back from the last row of the window
+[derived: `signals.py`]. `zscore` standardizes the score across assets,
+and `signal_to_expected_returns` turns it into an alpha by Grinold and
+Kahn's rule `alpha_i = IC * sigma_i * z_i`, with the IC an assumption.
+
+```python
+import numpy as np
+import portopt as po
+from portopt.research import signals as sg
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+h = x[:1004]                                        # history before row 1004
+mom = sg.momentum_12_1(h)
+z = sg.zscore(mom)
+sigma = np.sqrt(np.diag(po.annualize_cov(po.sample_cov(h[-252:]))))
+alpha = sg.signal_to_expected_returns(z, sigma, ic=0.05)
+print(np.round(mom, 4))
+print(np.round(z, 3))
+print(np.round(alpha, 4))
+# [0.3782 0.2836 0.3532 0.3074 0.7549 0.0522 0.0738 0.1434]
+# [ 0.404 -0.046  0.285  0.067  2.197 -1.148 -1.045 -0.714]
+# [ 0.0032 -0.0004  0.0021  0.0005  0.0222 -0.0029 -0.0029 -0.003 ]
+```
+
+## 25. How do I build and backtest a momentum rank portfolio?
+
+Python only, research layer. `rank_top_tercile` holds the top third of
+assets by the combined score in equal weight, long-only; with 8 assets
+that is `floor(8 / 3) = 2` (`top_fraction_weights`). The backtest is
+`run_backtest_net` on the pinned schedule, 10 bp, rf 2%.
+
+```python
+import numpy as np
+from portopt.research import run_backtest_net
+from portopt.research import signals as sg
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+print(sg.top_fraction_weights(sg.momentum_12_1(x[:1004])))
+
+rule = sg.rank_top_tercile(signals=["mom12_1"])
+res = run_backtest_net(x, rule, cost_bps=10, rf=0.02)
+ew = run_backtest_net(x, lambda h: np.full(h.shape[1], 1 / h.shape[1]), cost_bps=10, rf=0.02)
+print(f"momentum top third SR {res.sharpe:.3f} turnover/yr {res.annual_turnover:.2f}")
+print(f"1/N                SR {ew.sharpe:.3f}")
+# [0.5 0.  0.  0.  0.5 0.  0.  0. ]
+# momentum top third SR 0.237 turnover/yr 2.73
+# 1/N                SR 0.450
+```
+
+On the bundled data the drifts are constant, so momentum has nothing to
+find; the rule trails 1/N and trades 2.7 times NAV a year [measured:
+this recipe, synthetic data]. On real industry data momentum improved
+on 1/N before 2016 and was within one standard error of it afterwards
+(`docs/results/signal_study.md`; LEARN section 9).

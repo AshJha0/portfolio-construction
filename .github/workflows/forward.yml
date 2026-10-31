@@ -1,0 +1,83 @@
+name: Forward paper log
+
+# Monthly run of the pre-registered forward log on non-investable index
+# series (see forward/README.md).  Hypothetical, no real money.  Commits
+# only forward/ledger.csv, forward/results.md and data/real/manifest.json.
+
+on:
+  schedule:
+    - cron: "0 6 8 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute and print only; commit nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forward-log
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  forward:
+    name: Forward log
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check for rule files
+        id: rules
+        run: |
+          if compgen -G "forward/rules/*.json" > /dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Forward log::No rule files in forward/rules; nothing to do."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v7
+        if: steps.rules.outputs.present == 'true'
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        if: steps.rules.outputs.present == 'true'
+        run: python -m pip install -e python
+
+      - name: Fetch data (recorded in data/real/manifest.json, never committed)
+        if: steps.rules.outputs.present == 'true'
+        run: python scripts/fetch_data.py
+
+      - name: Run frozen rules
+        if: steps.rules.outputs.present == 'true'
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python forward/run_forward.py --dry-run
+          else
+            python forward/run_forward.py
+          fi
+
+      - name: Commit ledger, results and manifest
+        if: steps.rules.outputs.present == 'true' && inputs.dry_run != true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for f in forward/ledger.csv forward/results.md data/real/manifest.json; do
+            if [ -f "$f" ]; then git add -- "$f"; fi
+          done
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+            exit 0
+          fi
+          through=$(python -c "import json; m=json.load(open('data/real/manifest.json')); print(max(d['last_date'] for d in m['datasets'].values()))")
+          git commit -m "forward: monthly paper log update (data through ${through})" \
+                     -m "Automated run of forward/run_forward.py. Hypothetical research log on non-investable index series; no real money."
+          git push

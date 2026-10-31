@@ -5,11 +5,13 @@
 #   PORTOPT_BUILD_TESTS  build the GoogleTest suite (default ON when top level)
 #   PORTOPT_WERROR       treat warnings as errors (default OFF; CI turns it on)
 #   PORTOPT_SANITIZE     build with AddressSanitizer + UBSan (GCC/Clang only)
+#   PORTOPT_BUILD_BENCHMARKS  build portopt_bench (Google Benchmark, fetched;
+#                        default OFF, never part of the test build)
 # GoogleTest is taken from the system when available, otherwise fetched.
 # Tests run with the working directory set to this source dir so the
 # golden file resolves at ../data/golden/golden.json (per the contract).
 cmake_minimum_required(VERSION 3.25)
-project(portopt VERSION 1.2.0 LANGUAGES CXX)
+project(portopt VERSION 1.3.0 LANGUAGES CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -30,6 +32,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(PORTOPT_BUILD_TESTS "Build the portopt test suite" ${PROJECT_IS_TOP_LEVEL})
 option(PORTOPT_WERROR "Treat compiler warnings as errors" OFF)
 option(PORTOPT_SANITIZE "Build with ASan and UBSan (GCC/Clang)" OFF)
+option(PORTOPT_BUILD_BENCHMARKS "Build the Google Benchmark micro-benchmarks" OFF)
 
 # Warning and floating-point flags per compiler family (MSVC rejects
 # -Wextra outright).  -ffp-contract=off pins IEEE-754 semantics (no
@@ -104,4 +107,31 @@ if(PORTOPT_BUILD_TESTS)
   include(GoogleTest)
   gtest_discover_tests(portopt_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                        DISCOVERY_TIMEOUT 60)
+endif()
+
+# Micro-benchmarks (opt-in): cmake -DPORTOPT_BUILD_BENCHMARKS=ON, then run
+# portopt_bench from the build tree. Google Benchmark is fetched at a pinned
+# release and hash; its own tests, install rules and -Werror are disabled
+# so a third-party warning never fails a PORTOPT_WERROR build.
+if(PORTOPT_BUILD_BENCHMARKS)
+  include(FetchContent)
+  FetchContent_Declare(googlebenchmark
+    URL https://github.com/google/benchmark/archive/refs/tags/v1.9.1.tar.gz
+    URL_HASH SHA256=32131c08ee31eeff2c8968d7e874f3cb648034377dfc32a4c377fa8796d84981
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_WERROR OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googlebenchmark)
+  if(MSVC)
+    # Google Benchmark pins C++17 for its own targets, which would put
+    # /std:c++17 next to the global /std:c++latest (warning D9025); build it
+    # with /std:c++latest like every other target.
+    set_property(TARGET benchmark benchmark_main PROPERTY CXX_STANDARD)
+  endif()
+
+  add_executable(portopt_bench benchmarks/bench_kernels.cpp)
+  target_link_libraries(portopt_bench PRIVATE portopt portopt_flags benchmark::benchmark)
 endif()

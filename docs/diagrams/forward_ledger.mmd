@@ -1,0 +1,9 @@
+flowchart TD
+    CRON[".github/workflows/forward.yml: cron 06:00 UTC on the 8th, or manual"] --> RULES{"forward/rules/*.json present?"}
+    RULES -->|no| STOP["exit, nothing to log"]
+    RULES -->|yes| FETCH["python scripts/fetch_data.py: new vintage recorded in manifest.json"]
+    FETCH --> RUN["python forward/run_forward.py: validate each rule against its schema and STRATEGIES; weights from data before the month"]
+    RUN --> NEW{"new complete month?"}
+    NEW -->|no| STOP2["no change"]
+    NEW -->|yes| APP["append rows to forward/ledger.csv; rewrite forward/results.md"]
+    APP --> COMMIT["commit ledger.csv, results.md, manifest.json only"]

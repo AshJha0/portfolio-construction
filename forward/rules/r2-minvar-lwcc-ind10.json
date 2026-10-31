@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "r2-minvar-lwcc-ind10",
+  "study_id": "r2-forward-v1",
+  "frozen_at": "2026-11-01",
+  "git_tag": "forward-v1",
+  "strategy": {
+    "name": "min_variance_longonly_with",
+    "params": {
+      "estimator": "lwcc"
+    }
+  },
+  "dataset": "ind10_vw_daily",
+  "rf_dataset": "ff3_daily",
+  "lookback_days": 504,
+  "cost_bps": 10,
+  "band": 0.0,
+  "rebalance": "monthly",
+  "benchmark": {
+    "kind": "market"
+  },
+  "description": "Long-only minimum variance, Ledoit-Wolf constant-correlation covariance of the last 504 days, 10 industries, monthly, 10 bp, against the market (Mkt-RF + RF, no cost); development configuration ind10/min_var_lo.lwcc/L504/10bp. Hypothetical research log on non-investable Kenneth R. French index series; no real money, not investment advice."
+}

@@ -22,9 +22,15 @@
 /// Cholesky (API_SPEC.md section 3.6). The result is the KKT point of the
 /// QP up to rounding, so all ports agree to ~1e-13 and `converged` is a
 /// statement about the KKT conditions, not about an iterate step size.
+///
+/// Cost-aware problems min 1/2 w'Sw - c'w + kappa sum|w - w0| over the
+/// same box-simplex, optionally with a turnover cap, run the same dual
+/// active-set method on an exactly equivalent strictly convex split
+/// problem in (w, b, s) (API_SPEC.md section 3.7).
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -45,8 +51,9 @@ constexpr double kQpFeasTol = 1.0e-13;
 constexpr double kQpDegenerateTol = 1.0e-9;
 /// Pinned KKT certificate tolerance (relative) for `converged`.
 constexpr double kQpConvTol = 1.0e-9;
-/// Pinned relative conditioning threshold for the tangency denominator.
-constexpr double kTangencyCondRtol = 1.0e-6;
+/// Pinned default cap on the gross leverage sum_i |w_i| of the
+/// unconstrained tangency portfolio (API_SPEC 3.3).
+constexpr double kTangencyMaxLeverage = 10.0;
 
 /// Two-fund theorem scalars A, B, C, D (see file docstring).
 struct TwoFundScalars {
@@ -66,14 +73,17 @@ TwoFundScalars two_fund_scalars(const Vector& mu, const Matrix& sigma);
 Vector min_variance_weights(const Matrix& sigma);
 
 /// Tangency (max-Sharpe) weights S^-1 (mu - rf 1) / (A - rf C).
-/// \throws TangencyUndefinedError if A - rf*C <= kTangencyCondRtol *
-///   max(|A|, |rf|*C): the tangency portfolio is undefined when the
-///   risk-free rate is at or above the minimum-variance return A/C (in
-///   particular when rf exceeds every expected return) and numerically
-///   meaningless when rf sits within a relative 1e-6 of A/C (the weights
-///   scale like 1/(A - rf C) and reach gross leverage of 1e6+).
-/// \throws std::invalid_argument on malformed inputs (non-finite rf, ...).
-Vector tangency_weights(const Vector& mu, const Matrix& sigma, double rf);
+/// \param max_leverage cap on the gross leverage sum_i |w_i| (>= 1;
+///   +inf disables it).
+/// \throws TangencyUndefinedError if A - rf*C <= 0 (rf at or above the
+///   minimum-variance return A/C, in particular above every expected
+///   return) or if the gross leverage of the weights exceeds max_leverage
+///   (they scale like 1/(A - rf C), so rf just below A/C gives an
+///   allocation that is an artefact of the estimate of A/C).
+/// \throws std::invalid_argument on malformed inputs (non-finite rf,
+///   max_leverage below 1 or NaN, ...).
+Vector tangency_weights(const Vector& mu, const Matrix& sigma, double rf,
+                        double max_leverage = kTangencyMaxLeverage);
 
 /// Gross exposure sum_i |w_i| (1.0 for any long-only portfolio); a desk
 /// should cap it before unconstrained weights reach an OMS.
@@ -185,6 +195,69 @@ QpResult constrained_frontier_solve(const Vector& mu, const Matrix& sigma, doubl
 Vector constrained_frontier_weights(const Vector& mu, const Matrix& sigma, double target,
                                     const Vector& lb = Vector(),
                                     const Vector& ub = Vector(), int max_iter = kQpMaxIter);
+
+/// Output of the cost-aware (turnover-penalised) QP solvers.
+struct TurnoverQpResult {
+  Vector weights;       ///< Feasible weights (bounds exact, budget to rounding).
+  int iterations;       ///< Dual active-set iterations on the split problem.
+  bool converged;       ///< KKT certificate of the original nonsmooth problem holds.
+  double kkt_residual;  ///< Largest violation found by that certificate.
+  double turnover;      ///< sum_i |w_i - w0_i| of `weights` (compensated sum).
+};
+
+namespace detail {
+
+/// KKT certificate of min 1/2 w'Sw - c'w + kappa sum|w - w0| over
+/// {sum w = 1, lo <= w <= hi, sum|w - w0| <= cap} at `w`, with budget
+/// multiplier nu and cap multiplier tau (API_SPEC 3.7): with
+/// k = kappa + tau and g = S w - c - nu 1, -g_i must lie in the
+/// subdifferential of k |w_i - w0_i| plus the box indicator, tau >= 0, and
+/// tau > 0 only with a binding cap. Internal; exposed for testing.
+KktCertificate turnover_certificate(const Matrix& s, const Vector& c, const Vector& w0,
+                                    double kappa, const Vector& lo, const Vector& hi,
+                                    double cap, double nu, double tau, const Vector& w);
+
+}  // namespace detail
+
+/// Cost-aware minimum variance (API_SPEC 3.7):
+/// min 1/2 w'Sw + kappa sum_i |w_i - w0_i| s.t. sum w = 1, lb <= w <= ub
+/// and, when max_turnover is finite, sum_i |w_i - w0_i| <= max_turnover.
+/// kappa >= 0 is in the objective's (variance) units; +inf means no cap.
+/// Solved by the dual active-set QP on the split problem w = w0 + b - s
+/// with Hessian diag(S - eps I, eps I, eps I), eps = 0.5 / trace(S^-1),
+/// which is strictly convex and exactly equivalent (no perturbation);
+/// then re-polished in w on the identified face and certified.
+/// \throws std::invalid_argument on invalid input, infeasible bounds or a
+///   cap below the smallest attainable turnover.
+TurnoverQpResult min_variance_turnover_solve(
+    const Matrix& sigma, const Vector& w0, double kappa, const Vector& lb = Vector(),
+    const Vector& ub = Vector(),
+    double max_turnover = std::numeric_limits<double>::infinity(),
+    int max_iter = kQpMaxIter);
+
+/// Weights of min_variance_turnover_solve.
+/// \throws std::domain_error if the KKT certificate fails.
+Vector min_variance_turnover(const Matrix& sigma, const Vector& w0, double kappa,
+                             const Vector& lb = Vector(), const Vector& ub = Vector(),
+                             double max_turnover = std::numeric_limits<double>::infinity(),
+                             int max_iter = kQpMaxIter);
+
+/// Cost-aware mean-variance (API_SPEC 3.7):
+/// min 1/2 w'Sw - mu'w / risk_aversion + kappa sum_i |w_i - w0_i| over the
+/// same feasible set (risk_aversion > 0). Same method and certificate.
+TurnoverQpResult mean_variance_turnover_solve(
+    const Vector& mu, const Matrix& sigma, const Vector& w0, double risk_aversion,
+    double kappa, const Vector& lb = Vector(), const Vector& ub = Vector(),
+    double max_turnover = std::numeric_limits<double>::infinity(),
+    int max_iter = kQpMaxIter);
+
+/// Weights of mean_variance_turnover_solve.
+/// \throws std::domain_error if the KKT certificate fails.
+Vector mean_variance_turnover(const Vector& mu, const Matrix& sigma, const Vector& w0,
+                              double risk_aversion, double kappa,
+                              const Vector& lb = Vector(), const Vector& ub = Vector(),
+                              double max_turnover = std::numeric_limits<double>::infinity(),
+                              int max_iter = kQpMaxIter);
 
 /// Constrained frontier sweep on the pinned grid from the constrained
 /// minimum-variance return to the maximum attainable return under the
