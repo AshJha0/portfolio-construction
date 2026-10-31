@@ -51,8 +51,9 @@ CSV = sc.OUT_DIR / "signal_study.csv"
 
 
 def _panels(period: str, study_id: str | None) -> dict[str, rc.Panel]:
-    return {u: rc.load_panel(rc.UNIVERSES[u], period, study_id, rc.DATA_VINTAGE)
-            for u in rc.UNIVERSES}
+    return {
+        u: rc.load_panel(rc.UNIVERSES[u], period, study_id, rc.DATA_VINTAGE) for u in rc.UNIVERSES
+    }
 
 
 def phase_dev(workers: int) -> None:
@@ -85,8 +86,9 @@ def phase_seen(workers: int) -> None:
     panels = _panels("all", sc.SEEN_STUDY_ID)
     cfgs = [sc.config_from_id(c) for c in pr.SEEN_CONFIGS]
     res = sc.run_all(panels, cfgs, sc.SEEN_START, workers)
-    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-                          cwd=rc.ROOT).stdout.strip()
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=rc.ROOT
+    ).stdout.strip()
     rows = srep.seen_rows(panels, cfgs, res)
     for r in rows:
         r["git_head"] = head
@@ -110,7 +112,9 @@ def main() -> int:
     if a.phase == "seen":
         phase_seen(a.workers)
     if a.report or a.phase:
-        (sc.OUT_DIR / "signal_study.md").write_text(srep.render(srep.read_csv(CSV)), encoding="utf-8")
+        (sc.OUT_DIR / "signal_study.md").write_text(
+            srep.render(srep.read_csv(CSV)), encoding="utf-8"
+        )
     return 0
 
 

@@ -1185,8 +1185,9 @@ configurations]:
 | Risk budget (1/N scaled to 10% vol) | +0.13 (p = 0.02) on 10 industries; +0.03 on 49 | almost all in 1928-1969 |
 | Mean shrinkage (Bayes-Stein) | 0.00 (p = 0.87) | none |
 
-Nothing in that table is alpha in the usual sense: no rule forecast
-which industries would outperform. The gains come from holding less of
+Nothing in that table is alpha in the usual sense: none of those
+construction rules forecasts which industries will outperform (the
+signal study below does). The gains come from holding less of
 the volatile assets and from scaling down in volatile decades, and the
 largest of them sit in one or two sub-periods.
 
@@ -1212,6 +1213,37 @@ paragraph). Minimum variance still delivered what it is built to
 deliver, lower volatility; it did not deliver a higher Sharpe ratio.
 The two forward rules stay frozen as registered, because the protocol
 fixed them before the holdout was read.
+
+**What the signal study found.** The library also has return signals
+(`portopt.research.signals`): 12-1 momentum, time-series momentum,
+short-term reversal, low volatility and low beta, an equal or
+inverse-volatility combiner, alphas by `IC * sigma * z`, Black-Litterman
+views built from them, top-tercile rank portfolios, and sizing through
+the turnover QP. A separate study registered 66 development
+configurations and four hypotheses [measured:
+`docs/results/signal_study.md`; `docs/results/signal_preregistration.md`]:
+
+| id | Hypothesis (10 bp) | Development dSR (p) | 2016-2026 dSR (p) | Holm p |
+|---|---|---|---|---|
+| S1 | BL with 12-1 momentum views vs 1/N, 10 industries | 0.10 (0.01) | 0.01 (0.46) | 0.92 |
+| S2 | top tercile by 12-1 momentum vs 1/N, 49 industries | 0.11 (0.03) | 0.07 (0.27) | 0.81 |
+| S3 | turnover-penalised MV with momentum alphas vs min variance, 10 industries | 0.06 (0.17) | 0.12 (0.19) | 0.77 |
+| S4 | top tercile by low volatility vs 1/N, 49 industries | 0.09 (0.03) | -0.16 (0.92) | 0.92 |
+
+None is supported. Momentum improved on 1/N in development and kept a
+small positive sign in 2016-2026, but within one standard error (about
+0.1 to 0.2) and below the market (0.73); at 25 bp the gains shrink to
++0.03 and -0.02. Low volatility reversed. Short-term reversal lost about
+0.3 of Sharpe against 1/N in every development sub-period, at 15 times
+NAV turnover a year, because one-month industry returns continue rather
+than reverse [cited: Moskowitz and Grinblatt 1999]. The 2016-2026 period
+was a seen period for this study, not a clean holdout: the construction
+study's results on it had been read before the signals were chosen, and
+the registration was recorded locally in `data/real/registry.json`
+(2026-10-31T18:58:16Z) before the run but not pushed first. The honest
+summary is historical evidence for momentum before 2016 only, no edge established after costs and correction, being tracked forward: two momentum rules
+(`forward/rules/r2-signal-mom-bl-ind10.json`,
+`r2-signal-mom-rank-ind49.json`) joined the forward log.
 
 **Why statistical power is low.** The standard error of an annualised
 Sharpe ratio estimated over `Y` years of iid returns is about
@@ -1247,9 +1279,10 @@ the same 0.164 and 0.41].
 number above was produced after the rules, windows and estimators were
 chosen by people (the literature and us) who had seen much of that
 history, and even the holdout is clean only with respect to this
-repository's own choices. `forward/` records two frozen rules (long-only
+repository's own choices. `forward/` records four frozen rules (long-only
 min variance with Ledoit-Wolf constant-correlation covariance on 10 and
-49 industries) month by month from 2026-11, on data that did not exist
+49 industries, Black-Litterman with momentum views on 10 industries, and
+the momentum top tercile on 49) month by month from 2026-11, on data that did not exist
 when the rules were written [derived: `forward/README.md`;
 `forward/rules/*.json`]. It is a hypothetical paper portfolio on
 non-investable index series, with assumed costs and no real money, and

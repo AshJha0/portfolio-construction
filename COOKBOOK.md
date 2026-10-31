@@ -1,7 +1,7 @@
 # COOKBOOK: portopt recipes
 
 Task-oriented recipes. Recipes 1 to 12 are given in all four languages;
-recipes 13 to 23 are Python only.
+recipes 13 to 25 are Python only.
 
 **Python.** Every Python block is standalone: it starts with its own
 imports and data loading and runs as written from the `python/`
@@ -1217,3 +1217,66 @@ except data.HoldoutAccessError as e:
 this revision, so it carries no expected output; the study script
 `python/studies/real_data_study.py` uses a calendar schedule rather than
 the 21-row step shown here, so its numbers differ.
+
+---
+
+## 24. How do I compute 12-1 momentum and its z-scores?
+
+Python only, research layer (`portopt.research.signals`). The plain
+idea: an asset's compound return over the last twelve months, skipping
+the most recent one, is a score; higher is taken to mean a higher
+expected return [cited: Jegadeesh and Titman 1993]. A "month" is 21
+rows and a "year" 252, counted back from the last row of the window
+[derived: `signals.py`]. `zscore` standardizes the score across assets,
+and `signal_to_expected_returns` turns it into an alpha by Grinold and
+Kahn's rule `alpha_i = IC * sigma_i * z_i`, with the IC an assumption.
+
+```python
+import numpy as np
+import portopt as po
+from portopt.research import signals as sg
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+h = x[:1004]                                        # history before row 1004
+mom = sg.momentum_12_1(h)
+z = sg.zscore(mom)
+sigma = np.sqrt(np.diag(po.annualize_cov(po.sample_cov(h[-252:]))))
+alpha = sg.signal_to_expected_returns(z, sigma, ic=0.05)
+print(np.round(mom, 4))
+print(np.round(z, 3))
+print(np.round(alpha, 4))
+# [0.3782 0.2836 0.3532 0.3074 0.7549 0.0522 0.0738 0.1434]
+# [ 0.404 -0.046  0.285  0.067  2.197 -1.148 -1.045 -0.714]
+# [ 0.0032 -0.0004  0.0021  0.0005  0.0222 -0.0029 -0.0029 -0.003 ]
+```
+
+## 25. How do I build and backtest a momentum rank portfolio?
+
+Python only, research layer. `rank_top_tercile` holds the top third of
+assets by the combined score in equal weight, long-only; with 8 assets
+that is `floor(8 / 3) = 2` (`top_fraction_weights`). The backtest is
+`run_backtest_net` on the pinned schedule, 10 bp, rf 2%.
+
+```python
+import numpy as np
+from portopt.research import run_backtest_net
+from portopt.research import signals as sg
+
+x = np.loadtxt("../data/asset_returns.csv", delimiter=",", skiprows=1)
+print(sg.top_fraction_weights(sg.momentum_12_1(x[:1004])))
+
+rule = sg.rank_top_tercile(signals=["mom12_1"])
+res = run_backtest_net(x, rule, cost_bps=10, rf=0.02)
+ew = run_backtest_net(x, lambda h: np.full(h.shape[1], 1 / h.shape[1]), cost_bps=10, rf=0.02)
+print(f"momentum top third SR {res.sharpe:.3f} turnover/yr {res.annual_turnover:.2f}")
+print(f"1/N                SR {ew.sharpe:.3f}")
+# [0.5 0.  0.  0.  0.5 0.  0.  0. ]
+# momentum top third SR 0.237 turnover/yr 2.73
+# 1/N                SR 0.450
+```
+
+On the bundled data the drifts are constant, so momentum has nothing to
+find; the rule trails 1/N and trades 2.7 times NAV a year [measured:
+this recipe, synthetic data]. On real industry data momentum improved
+on 1/N before 2016 and was within one standard error of it afterwards
+(`docs/results/signal_study.md`; LEARN section 9).

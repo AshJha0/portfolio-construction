@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "r2-signal-mom-rank-ind49",
+  "study_id": "r2-forward-signals-v1",
+  "frozen_at": "2026-11-01",
+  "git_tag": "forward-v1",
+  "strategy": {
+    "name": "rank_top_tercile",
+    "params": {
+      "signals": [
+        "mom12_1"
+      ],
+      "method": "equal"
+    }
+  },
+  "dataset": "ind49_vw_daily",
+  "rf_dataset": "ff3_daily",
+  "lookback_days": 252,
+  "cost_bps": 10,
+  "band": 0.0,
+  "rebalance": "monthly",
+  "benchmark": {
+    "kind": "strategy",
+    "name": "equal_weight",
+    "params": {}
+  },
+  "description": "Long-only, equal weight on the 16 of 49 industries with the highest 12-1 momentum (compound return over trading days t-252..t-22), monthly, 10 bp, against 1/N; development configuration ind49/rank.mom12_1/10bp (hypothesis S2). Hypothetical research log on non-investable Kenneth R. French index series; no real money, not investment advice."
+}

@@ -44,6 +44,20 @@ so its row equals unconstrained min variance.
   them, `vol_target`); `data` (Kenneth French loader with SHA-256
   vintages and a holdout gate); `walkforward` (trial registry,
   calendar schedule, `walk_forward`); `run_backtest_net(vol_estimator=...)`.
+- Signals (`portopt.research.signals`): 12-1 momentum, time-series
+  momentum, short-term reversal, low volatility, low beta, `zscore`,
+  `combine` (equal or inverse-volatility), `signal_to_expected_returns`
+  (`IC * sigma * z`), `rank_top_tercile`, `SignalMeanVariance`
+  (turnover-QP sizing) and `signal_black_litterman`; forward-runner
+  strategies `rank_top_tercile` and `signal_black_litterman`. Signal
+  study `docs/results/signal_study.md` with pre-registration
+  `signal_preregistration.md` (registry studies `r2-signal-dev`, 66
+  configurations, `r2-signal-v1`, 17, `r2-forward-signals-v1`, 2): none
+  of four hypotheses supported (Holm p 0.77 to 0.92); momentum improved
+  on 1/N before 2016 only. 2016-2026 was a seen period, and the
+  registration was recorded locally before the run but not pushed
+  first. Two forward rules, `r2-signal-mom-bl-ind10.json` and
+  `r2-signal-mom-rank-ind49.json`.
 - Real data: `scripts/fetch_data.py`, `data/real/README.md`,
   `manifest.json` and `registry.json`. Third-party files are fetched at
   run time and never committed (`data/real/raw/` is git-ignored).
@@ -54,7 +68,7 @@ so its row equals unconstrained min variance.
   none of the six hypotheses is supported (every Holm-adjusted p-value
   1.00, all six differences with the wrong sign), with power of 0.04 to
   0.28.
-- Forward paper log: `forward/run_forward.py`, two frozen rule files in
+- Forward paper log: `forward/run_forward.py`, four frozen rule files in
   `forward/rules/`, `forward/README.md` and the monthly workflow
   `.github/workflows/forward.yml`. Hypothetical, non-investable indices,
   no real money.
@@ -62,8 +76,16 @@ so its row equals unconstrained min variance.
   `cpp/benchmarks/`, `rust/benches/`, Java `bench` profile), a CI smoke
   job, and `docs/results/benchmarks.md`.
 - Docs: LEARN section 9 (where portfolio-construction P&L comes from),
-  COOKBOOK recipes 19 to 23, ARCHITECTURE diagrams
+  COOKBOOK recipes 19 to 25, ARCHITECTURE diagrams
   `real_data_holdout.mmd` and `forward_ledger.mmd`.
+
+### Known issues
+
+- `mean_variance_turnover_solve` can take minutes on some n = 49
+  problems, and the Python QP is slow at n = 49 in general.
+- The forward runner cannot run path-dependent rules (volatility
+  targeting, partial rebalancing) and passes total returns, so
+  time-series momentum uses rf = 0 there.
 
 ### Changed
 

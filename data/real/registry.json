@@ -5122,6 +5122,1383 @@
           "vol_target": null
         }
       ]
+    },
+    {
+      "id": "r2-signal-dev",
+      "description": "Round 2 signal exploration on 1926-07-01..2015-12-31 (period='development' only): every configuration evaluated by python/studies/signal_study.py --phase dev, registered before the first run.",
+      "registered_at_utc": "2026-10-31T18:07:30Z",
+      "n_configs": 66,
+      "configs_sha256": "8b308307b80cf9081d79ab6ce7f1b4be7bb6a9644daafad54bf279ee6e3c70a5",
+      "configs": [
+        {
+          "cost_bps": null,
+          "id": "ind10/market",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "market",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 10.0,
+          "id": "ind10/equal_weight/10bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "id": "ind10/minvar.lwcc/L504/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "minvar",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind10/rank.mom12_1/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind10/rank.tsmom/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind10/rank.strev/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind10/rank.lowvol/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind10/rank.lowbeta/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind10/rank.combo_eq/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "inverse_vol",
+          "cost_bps": 10.0,
+          "id": "ind10/rank.combo_iv/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.mom12_1/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.tsmom/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.strev/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.lowvol/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.lowbeta/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.combo_eq/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "inverse_vol",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.combo_iv/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.mom12_1/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.tsmom/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.strev/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.lowvol/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.lowbeta/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.combo_eq/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "inverse_vol",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.combo_iv/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 25.0,
+          "id": "ind10/equal_weight/25bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "id": "ind10/minvar.lwcc/L504/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "minvar",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind10/rank.mom12_1/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind10/rank.tsmom/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind10/rank.strev/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind10/rank.lowvol/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind10/rank.lowbeta/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind10/rank.combo_eq/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "inverse_vol",
+          "cost_bps": 25.0,
+          "id": "ind10/rank.combo_iv/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.mom12_1/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.tsmom/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.strev/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.lowvol/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.lowbeta/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.combo_eq/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "inverse_vol",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.combo_iv/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.mom12_1/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.tsmom/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.strev/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.lowvol/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.lowbeta/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.combo_eq/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "combine": "inverse_vol",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.combo_iv/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": null,
+          "id": "ind49/market",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "market",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": 10.0,
+          "id": "ind49/equal_weight/10bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "id": "ind49/minvar.lwcc/L504/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "minvar",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.mom12_1/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.tsmom/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.strev/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.lowvol/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.lowbeta/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.combo_eq/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "inverse_vol",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.combo_iv/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": 25.0,
+          "id": "ind49/equal_weight/25bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "id": "ind49/minvar.lwcc/L504/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "minvar",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.mom12_1/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.tsmom/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "tsmom",
+          "signals": [
+            "tsmom"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.strev/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "strev",
+          "signals": [
+            "strev"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.lowvol/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.lowbeta/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowbeta",
+          "signals": [
+            "lowbeta"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.combo_eq/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_eq",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "inverse_vol",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.combo_iv/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "combo_iv",
+          "signals": [
+            "mom12_1",
+            "tsmom",
+            "strev",
+            "lowbeta"
+          ],
+          "universe": "ind49"
+        }
+      ]
+    },
+    {
+      "id": "r2-signal-v1",
+      "description": "Round 2 signal study, seen period 2016-01..2026-09 (not a clean holdout: the construction study's results on it were seen first). Hypotheses SHA-256 ac447b6cba3716e4611e66a7518c53c3e762da9e567c70dcbc634522b6ecbeaa; see docs/results/signal_preregistration.md.",
+      "registered_at_utc": "2026-10-31T18:58:16Z",
+      "n_configs": 17,
+      "configs_sha256": "593721e2914c1624abcc56b182a4b823b866b32430f3950e1652a77afe224681",
+      "configs": [
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.mom12_1/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 10.0,
+          "id": "ind10/equal_weight/10bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "confidence": 1.0,
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "delta": 2.5,
+          "equilibrium": "1/N",
+          "ic": 0.05,
+          "id": "ind10/bl.mom12_1/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "bl",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "tau": 0.05,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 25.0,
+          "id": "ind10/equal_weight/25bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.mom12_1/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": 10.0,
+          "id": "ind49/equal_weight/10bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.mom12_1/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": 25.0,
+          "id": "ind49/equal_weight/25bp",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "equal_weight",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.mom12_1/10bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "id": "ind10/minvar.lwcc/L504/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "minvar",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "ic": 0.05,
+          "id": "ind10/mvtc.mom12_1/25bp",
+          "kappa": "12 * cost / gamma; w0 drifted",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "risk_aversion": 5.0,
+          "rule": "mvtc",
+          "signal": "mom12_1",
+          "signals": [
+            "mom12_1"
+          ],
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": 25.0,
+          "cov": "lwcc",
+          "id": "ind10/minvar.lwcc/L504/25bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "minvar",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 10.0,
+          "id": "ind49/rank.lowvol/10bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "combine": "equal",
+          "cost_bps": 25.0,
+          "id": "ind49/rank.lowvol/25bp",
+          "month_rows": 21,
+          "portfolio": "equal weight on floor(n/3) highest combined z-scores",
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "rank",
+          "signal": "lowvol",
+          "signals": [
+            "lowvol"
+          ],
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": null,
+          "id": "ind10/market",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "market",
+          "signal": null,
+          "universe": "ind10"
+        },
+        {
+          "cost_bps": null,
+          "id": "ind49/market",
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "market",
+          "signal": null,
+          "universe": "ind49"
+        },
+        {
+          "cost_bps": 10.0,
+          "cov": "lwcc",
+          "id": "ind49/minvar.lwcc/L504/10bp",
+          "lookback_days": 504,
+          "month_rows": 21,
+          "rebalance": "monthly, first trading day of each calendar month",
+          "rule": "minvar",
+          "signal": null,
+          "universe": "ind49"
+        }
+      ]
+    },
+    {
+      "id": "r2-forward-signals-v1",
+      "description": "Round 2 forward signal rules, frozen 2026-11-01 (git tag forward-v1); the configuration list is the rule files as written.",
+      "registered_at_utc": "2026-10-31T18:58:16Z",
+      "n_configs": 2,
+      "configs_sha256": "c038d003d5537bdb95ffc77c053dff8b170a07eccc9fa502e5486acc474eade8",
+      "configs": [
+        {
+          "band": 0.0,
+          "benchmark": {
+            "kind": "strategy",
+            "name": "equal_weight",
+            "params": {}
+          },
+          "cost_bps": 10,
+          "dataset": "ind10_vw_daily",
+          "description": "Black-Litterman with one absolute 12-1 momentum view per industry (alpha = 0.05 x monthly vol x z, 1/N equilibrium, delta 2.5, tau 0.05), long-only mean-variance on the posterior, LW constant-correlation covariance of the last 504 days, 10 industries, monthly, 10 bp, against 1/N; development configuration ind10/bl.mom12_1/10bp (hypothesis S1). Hypothetical research log on non-investable Kenneth R. French index series; no real money, not investment advice.",
+          "frozen_at": "2026-11-01",
+          "git_tag": "forward-v1",
+          "id": "r2-signal-mom-bl-ind10",
+          "lookback_days": 504,
+          "rebalance": "monthly",
+          "rf_dataset": "ff3_daily",
+          "schema_version": 1,
+          "strategy": {
+            "name": "signal_black_litterman",
+            "params": {
+              "confidence": 1.0,
+              "delta": 2.5,
+              "ic": 0.05,
+              "lookback": 504,
+              "method": "equal",
+              "signals": [
+                "mom12_1"
+              ],
+              "tau": 0.05
+            }
+          },
+          "study_id": "r2-forward-signals-v1"
+        },
+        {
+          "band": 0.0,
+          "benchmark": {
+            "kind": "strategy",
+            "name": "equal_weight",
+            "params": {}
+          },
+          "cost_bps": 10,
+          "dataset": "ind49_vw_daily",
+          "description": "Long-only, equal weight on the 16 of 49 industries with the highest 12-1 momentum (compound return over trading days t-252..t-22), monthly, 10 bp, against 1/N; development configuration ind49/rank.mom12_1/10bp (hypothesis S2). Hypothetical research log on non-investable Kenneth R. French index series; no real money, not investment advice.",
+          "frozen_at": "2026-11-01",
+          "git_tag": "forward-v1",
+          "id": "r2-signal-mom-rank-ind49",
+          "lookback_days": 252,
+          "rebalance": "monthly",
+          "rf_dataset": "ff3_daily",
+          "schema_version": 1,
+          "strategy": {
+            "name": "rank_top_tercile",
+            "params": {
+              "method": "equal",
+              "signals": [
+                "mom12_1"
+              ]
+            }
+          },
+          "study_id": "r2-forward-signals-v1"
+        }
+      ]
     }
   ]
 }

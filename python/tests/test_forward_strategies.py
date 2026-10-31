@@ -181,9 +181,17 @@ RULE_FILES = sorted((REPO / "forward" / "rules").glob("*.json"))
 @pytest.mark.skipif(not RULE_FILES, reason="no frozen rule files yet")
 def test_committed_rules_validate_and_are_registered() -> None:
     rules = runner.load_rules(REPO / "forward" / "rules")
-    assert 1 <= len(rules) <= 2, "the pre-registration freezes at most two forward rules"
     registry = rd.load_registry(REPO / "data" / "real")
     by_id = {s["id"]: s for s in registry["studies"]}
+    # Each forward study's pre-registration freezes at most two rules, and
+    # every committed rule file is one of its study's registered configs.
+    per_study: dict[str, int] = {}
+    for rule in rules:
+        per_study[rule.study_id] = per_study.get(rule.study_id, 0) + 1
+    assert per_study, "no forward rules committed"
+    for sid, count in per_study.items():
+        assert 1 <= count <= 2, f"study {sid} freezes {count} forward rules (at most two)"
+        assert count == len(by_id[sid]["configs"]), f"study {sid}: rule count != registered configs"
     for rule, path in zip(rules, RULE_FILES, strict=True):
         assert rule.study_id in by_id, f"{rule.id}: study {rule.study_id} is not registered"
         doc = json.loads(path.read_text(encoding="utf-8"))

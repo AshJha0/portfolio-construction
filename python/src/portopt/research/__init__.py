@@ -27,6 +27,11 @@ backtest deliberately leaves out:
   Kenneth French Data Library, fetched at run time and checked against
   the SHA-256 vintages in ``data/real/manifest.json``; the holdout period
   is refused unless a registered study asks for it.
+* :mod:`portopt.research.signals`: return signals (12-1 momentum,
+  time-series momentum, short-term reversal, low volatility and low
+  beta), z-score combination, and weight rules that turn them into
+  expected returns (``alpha = IC sigma z``), Black-Litterman views or
+  rank portfolios.  Every signal uses only rows before the decision date.
 * :mod:`portopt.research.walkforward`: a trial registry
   (``data/real/registry.json``) and walk-forward evaluation on top of
   :func:`run_backtest_net`.
@@ -40,7 +45,7 @@ keep doing it.
 
 from __future__ import annotations
 
-from . import data, walkforward
+from . import data, signals, walkforward
 from .costs import NetBacktestResult, run_backtest_net
 from .estimators import (
     FactorModelResult,
@@ -158,6 +163,7 @@ __all__ = [
     "sample_estimator",
     "vol_target",
     "data",
+    "signals",
     "walkforward",
     "WalkForwardResult",
     "n_trials",

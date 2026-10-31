@@ -144,6 +144,7 @@ Python names; the ports use the same names in each language's casing
 | Risk parity | `risk_contributions`, `erc_weights`, `risk_budget_solve`, `risk_budget_weights`, `inverse_vol_weights` | cyclical coordinate descent on Spinu's log-barrier form, tol 1e-10, at most 10,000 sweeps |
 | Backtest | `rebalance_indices`, `run_backtest`, `annualized_return`, `annualized_vol`, `sharpe_ratio`, `max_drawdown` | expanding window 500 rows, re-estimate every 63 rows, L1 turnover between target vectors |
 | Research layer (Python only, not pinned) | `portopt.research`: `run_backtest_net`, `run_schedule_net`, `walk_forward`; `ewma_covariance`, `ledoit_wolf_identity`, `nonlinear_shrinkage`, `pca_factor_covariance`, `bayes_stein_mean`; `vol_target`, `min_variance_longonly_with`, `erc_with`, `tangency_capped`; `sharpe_se_*`, `deflated_sharpe_ratio`, `sharpe_difference_test` | drifted weights and costs on traded notional, bands, partial rebalancing, volatility targeting with a chosen estimator; no golden values |
+| Signals (Python only, not pinned) | `portopt.research.signals`: `momentum_12_1`, `tsmom`, `short_term_reversal`, `low_volatility`, `low_beta`, `zscore`, `combine`, `signal_to_expected_returns`, `rank_top_tercile`, `SignalMeanVariance`, `signal_black_litterman` | month = 21 rows, year = 252; alphas `IC * sigma * z` with IC assumed; no weight fitted to returns |
 | Real data (Python only) | `portopt.research.data.load_returns`, `scripts/fetch_data.py`, `data/real/registry.json` | Kenneth French files fetched at run time, checked against SHA-256 vintages, never committed; holdout refused without a registered study |
 
 ## Demo output
@@ -271,6 +272,19 @@ does not show the levers are worthless; it shows their development gains
 were too small and too regime-dependent to rely on
 ([docs/results/real_data_study.md](docs/results/real_data_study.md); measured).
 
+**Signals: historical evidence for momentum before 2016 only, no edge established after costs and correction, being tracked forward.** `portopt.research.signals`
+provides 12-1 momentum, time-series momentum, short-term reversal, low
+volatility and low beta, a combiner, `IC * sigma * z` alphas,
+Black-Litterman views, rank portfolios and turnover-QP sizing. None of
+four registered hypotheses is supported (Holm p 0.77 to 0.92). Momentum
+improved on 1/N in development (+0.10 to +0.11, one-sided p 0.01 to
+0.03) and kept a small positive sign in 2016-2026, within one standard
+error and below the market. Low volatility reversed; short-term reversal
+lost about 0.3 of Sharpe in every sub-period. 2016-2026 was a seen
+period for this study, not a clean holdout, and its registration was
+recorded locally before the run but not pushed first
+([docs/results/signal_study.md](docs/results/signal_study.md); measured).
+
 **Benchmarks.** On one non-idle laptop, at n = 8 the long-only QP takes
 about 8 us in C++, Rust and Java and 460 us in Python; at n = 50, 2.9 to
 5.7 ms against 830 ms. Gaps below about 2x between languages are not
@@ -279,9 +293,11 @@ meaningful
 
 ## Forward paper portfolio
 
-[`forward/`](forward/README.md) keeps a monthly log of two rules frozen
-before the holdout was read: long-only min variance with Ledoit-Wolf
-constant-correlation covariance on 10 and 49 industries, 10 bp. It is
+[`forward/`](forward/README.md) keeps a monthly log of four frozen rules:
+long-only min variance with Ledoit-Wolf constant-correlation covariance
+on 10 and 49 industries (frozen before the holdout was read), and
+Black-Litterman with momentum views on 10 industries and the momentum
+top tercile on 49 (study `r2-forward-signals-v1`), all at 10 bp. It is
 hypothetical: the series are non-investable research indices, costs are
 assumed, no real money is involved, and it is not investment advice. A
 scheduled workflow (`.github/workflows/forward.yml`) appends one month at
@@ -380,7 +396,7 @@ Version 1.3.0. Every change is recorded in [CHANGELOG.md](CHANGELOG.md).
 New in 1.3.0: the tangency leverage cap, the cost-aware turnover QP in
 all four languages (three new golden cases), estimators and weight rules
 in the research layer, real data with a frozen holdout, a forward paper
-log, and kernel benchmarks.
+log, return signals (`portopt.research.signals`), and kernel benchmarks.
 
 Still open:
 
@@ -388,7 +404,11 @@ Still open:
   Python research layer has them);
 - a solver that scales past a few dozen assets (the n = 49 study used a
   separate primal active-set solver in `python/studies/real_data_engine.py`);
-- volatility targeting and partial rebalancing in the forward runner.
+- known issues: `mean_variance_turnover_solve` can take minutes on some
+  n = 49 problems, and the Python QP is slow at n = 49 generally; the
+  forward runner cannot run path-dependent rules (volatility targeting,
+  partial rebalancing) and passes total returns, so time-series momentum
+  uses rf = 0 there.
 
 ## References
 

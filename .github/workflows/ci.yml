@@ -193,6 +193,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e python && python python/benchmarks/bench_kernels.py --quick --sizes 8
+      - name: Select GCC 14 (C++26)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q g++-14
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
       - name: C++ (Google Benchmark)
         run: |
           cmake -S cpp -B build-bench -DCMAKE_BUILD_TYPE=Release -DPORTOPT_WERROR=ON -DPORTOPT_BUILD_TESTS=OFF -DPORTOPT_BUILD_BENCHMARKS=ON

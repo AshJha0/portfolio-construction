@@ -392,8 +392,8 @@ class SignalMeanVariance:
         res = mean_variance_turnover_solve(alpha, sig, w0, self.gamma, self.kappa)
         if not res.converged:
             self.n_unconverged += 1
-        w = np.clip(np.asarray(res.weights, dtype=float), 0.0, None)
-        w = w / math.fsum(w.tolist())
+        raw = np.clip(np.asarray(res.weights, dtype=float), 0.0, None)
+        w: np.ndarray = raw / math.fsum(raw.tolist())
         self.targets.append(w)
         self.last_t = t
         return w
@@ -456,9 +456,7 @@ def signal_black_litterman(
             raise ValueError(f"signal_black_litterman needs {rows} rows of history")
         score = combine(names, h, method=method, rf_daily=rfv)
         sig = est(h[-int(lookback) :])
-        return bl_signal_weights(
-            sig, score, ic=ic, delta=delta, tau=tau, confidence=confidence
-        )
+        return bl_signal_weights(sig, score, ic=ic, delta=delta, tau=tau, confidence=confidence)
 
     return WeightFunction(f"signal_black_litterman[{'+'.join(names)}|{method}]", fn)
 

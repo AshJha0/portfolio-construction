@@ -48,12 +48,14 @@ import numpy as np
 
 try:
     from portopt.research import data as rd
+    from portopt.research import signals as sig
     from portopt.research import strategies as strat
     from portopt.research import strategies_v2 as strat_v2
     from portopt.research import walkforward as wf
 except ImportError:  # running from a checkout without `pip install -e python`
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "src"))
     from portopt.research import data as rd
+    from portopt.research import signals as sig
     from portopt.research import strategies as strat
     from portopt.research import strategies_v2 as strat_v2
     from portopt.research import walkforward as wf
@@ -173,6 +175,12 @@ STRATEGIES: dict[str, Callable[..., strat.WeightFunction]] = {
     "min_variance_longonly_with": min_variance_longonly_with,
     "erc_with": erc_with,
     "max_sharpe_bayes_stein": max_sharpe_bayes_stein,
+    # portopt.research.signals rules; params are JSON already: "signals" is a
+    # list of signal names, "method" "equal" or "inverse_vol".  Stateless, so
+    # the runner's fixed trailing window is all they read (lookback_days must
+    # cover portopt.research.signals.combine_rows, and the BL lookback).
+    "rank_top_tercile": sig.rank_top_tercile,
+    "signal_black_litterman": sig.signal_black_litterman,
 }
 ASSET_DATASETS = ("ind10_vw_daily", "ind49_vw_daily")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
