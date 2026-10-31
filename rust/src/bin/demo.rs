@@ -4,8 +4,9 @@
 //!
 //! Prints: estimator table, unconstrained + long-only frontier sweep,
 //! Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
-//! contributions, and a 63-day re-estimation backtest across six
-//! methods (mirrors `python/demo.py`).
+//! contributions, cost-aware (turnover-penalised) long-only min variance,
+//! and a 63-day re-estimation backtest across seven methods (mirrors
+//! `python/demo.py`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -185,9 +186,53 @@ fn run() -> po::Result<()> {
         sci(spread(&rc_iv), 2)
     );
 
+    // ------------------------------------------------------------ cost-aware
+    rule("Cost-aware rebalancing: long-only min variance from market weights");
+    println!(
+        "objective 1/2 w'Sw + kappa*sum|w - w0|, w0 = market weights, kappa in variance units"
+    );
+    println!(
+        "{:>10}{:>10}{:>9}{:>11}",
+        "kappa", "turnover", "vol", "certified"
+    );
+    let inf = f64::INFINITY;
+    for kappa in [0.0, 3e-5, 1e-4, 3e-4, 1e-3] {
+        let r_tc =
+            po::min_variance_turnover_solve(&sig, &w_mkt, kappa, None, None, inf, po::QP_MAX_ITER)?;
+        let vol_tc = po::linalg::dot(&r_tc.weights, &sig.matvec(&r_tc.weights)).sqrt();
+        let ok = if r_tc.converged && r_tc.kkt_residual < 1e-12 {
+            "yes"
+        } else {
+            "NO"
+        };
+        println!(
+            "{:>10.6}{:>10.4}{:>9.4}{:>11}",
+            kappa, r_tc.turnover, vol_tc, ok
+        );
+    }
+    let r_cap =
+        po::min_variance_turnover_solve(&sig, &w_mkt, 0.0, None, None, 0.25, po::QP_MAX_ITER)?;
+    println!(
+        "kappa 0 with turnover cap 0.25: turnover {:.4}, vol {:.4}",
+        r_cap.turnover,
+        po::linalg::dot(&r_cap.weights, &sig.matvec(&r_cap.weights)).sqrt()
+    );
+    println!("{header}");
+    println!("{}", wrow("w market", &w_mkt));
+    println!(
+        "{}",
+        wrow(
+            "w kappa 1e-4",
+            &po::min_variance_turnover(&sig, &w_mkt, 1e-4, None, None, inf)?
+        )
+    );
+    println!("{}", wrow("w cap 0.25", &r_cap.weights));
+
     // -------------------------------------------------------------- backtest
     rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)");
-    let mut fallbacks = 0usize;
+    let mut fallback_undefined = 0usize;
+    let mut fallback_leverage = 0usize;
+    let mut prev_tc: Option<Vec<f64>> = None;
     let window = cfg.estimation_window;
     let step = cfg.rebalance_step;
 
@@ -205,18 +250,39 @@ fn run() -> po::Result<()> {
             }),
         ),
         (
+            "min_var_tc",
+            Box::new(|h: &Matrix| {
+                // Long-only min variance with turnover penalty kappa = 3e-5
+                // against the previous target (equal weight before the first
+                // rebalance).
+                let s = po::annualize_cov(&po::sample_cov(h)?, ann)?;
+                let w0 = prev_tc
+                    .clone()
+                    .unwrap_or_else(|| vec![1.0 / h.ncols() as f64; h.ncols()]);
+                let w = po::min_variance_turnover(&s, &w0, 3e-5, None, None, f64::INFINITY)?;
+                prev_tc = Some(w.clone());
+                Ok(w)
+            }),
+        ),
+        (
             "tangency",
             Box::new(|h: &Matrix| {
                 // Pinned backtest method (API_SPEC 6.3): tangency, falling
                 // back to unconstrained min-variance for a rebalance where
-                // tangency is undefined or ill-conditioned — reported, not
-                // crashed. Any other error (e.g. singular covariance) propagates.
+                // tangency is undefined (rf at or above A/C) or above the
+                // gross-leverage cap, reported, not crashed. Any other error
+                // (e.g. singular covariance) propagates.
                 let s = po::annualize_cov(&po::sample_cov(h)?, ann)?;
                 let m = po::annualize_mean(&po::sample_mean(h)?, ann)?;
                 match po::tangency_weights(&m, &s, rf) {
                     Ok(w) => Ok(w),
                     Err(PortOptError::TangencyUndefined(_)) => {
-                        fallbacks += 1;
+                        let sc = po::two_fund_scalars(&m, &s)?;
+                        if sc.a - rf * sc.c <= 0.0 {
+                            fallback_undefined += 1;
+                        } else {
+                            fallback_leverage += 1;
+                        }
                         po::min_variance_weights(&s)
                     }
                     Err(e) => Err(e),
@@ -254,12 +320,18 @@ fn run() -> po::Result<()> {
             name, r.ann_return, r.ann_vol, r.sharpe, r.max_drawdown, r.avg_turnover
         );
     }
-    if fallbacks > 0 {
+    let n_fb = fallback_undefined + fallback_leverage;
+    if n_fb > 0 {
         println!(
-            "note: tangency undefined/ill-conditioned at {fallbacks} rebalance date(s) \
-             (rf at or above the min-var return); fell back to min-variance there."
+            "note: tangency fell back to min-variance at {n_fb} rebalance date(s): \
+             {fallback_undefined} with rf at or above the min-var return A/C, \
+             {fallback_leverage} above the {}x gross-leverage cap.",
+            po::TANGENCY_MAX_LEVERAGE
         );
     }
+    println!(
+        "min_var_tc = min_var_lo with turnover penalty kappa = 3e-5 against the previous target."
+    );
 
     println!("\ndemo complete.");
     Ok(())

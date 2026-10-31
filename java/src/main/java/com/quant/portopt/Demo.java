@@ -16,7 +16,8 @@ import java.util.Map;
  *
  * <p>Prints: estimator table, unconstrained + long-only frontier sweep,
  * Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
- * contributions, and a 63-day re-estimation backtest across six methods.
+ * contributions, cost-aware (turnover-penalised) long-only min variance,
+ * and a 63-day re-estimation backtest across seven methods.
  */
 public final class Demo {
 
@@ -145,9 +146,32 @@ public final class Demo {
         System.out.println(wrow("RC inv-vol", rcIv));
         System.out.printf("RC spread: ERC %.2e, inv-vol %.2e%n", spread(rcErc), spread(rcIv));
 
+        // ----------------------------------------------------------- cost-aware
+        rule("Cost-aware rebalancing: long-only min variance from market weights");
+        System.out.println("objective 1/2 w'Sw + kappa*sum|w - w0|, w0 = market weights, "
+                + "kappa in variance units");
+        System.out.printf("%10s%10s%9s%11s%n", "kappa", "turnover", "vol", "certified");
+        double inf = Double.POSITIVE_INFINITY;
+        for (double kappa : new double[] {0.0, 3e-5, 1e-4, 3e-4, 1e-3}) {
+            Markowitz.TurnoverQpResult rTc = Markowitz.minVarianceTurnoverSolve(sig, wMkt, kappa,
+                    null, null, inf, Markowitz.QP_MAX_ITER);
+            double volTc = Math.sqrt(Linalg.quadForm(rTc.weights(), sig));
+            String ok = (rTc.converged() && rTc.kktResidual() < 1e-12) ? "yes" : "NO";
+            System.out.printf("%10.6f%10.4f%9.4f%11s%n", kappa, rTc.turnover(), volTc, ok);
+        }
+        Markowitz.TurnoverQpResult rCap = Markowitz.minVarianceTurnoverSolve(sig, wMkt, 0.0,
+                null, null, 0.25, Markowitz.QP_MAX_ITER);
+        System.out.printf("kappa 0 with turnover cap 0.25: turnover %.4f, vol %.4f%n",
+                rCap.turnover(), Math.sqrt(Linalg.quadForm(rCap.weights(), sig)));
+        System.out.println(hdr);
+        System.out.println(wrow("w market", wMkt));
+        System.out.println(wrow("w kappa 1e-4", Markowitz.minVarianceTurnover(sig, wMkt, 1e-4)));
+        System.out.println(wrow("w cap 0.25", rCap.weights()));
+
         // ------------------------------------------------------------- backtest
         rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)");
-        int[] fallbacks = {0};
+        int[] fallbacks = {0, 0}; // {rf at or above A/C, above the leverage cap}
+        double[][] prevTc = {null};
         Map<String, Backtest.WeightFunction> methods = new LinkedHashMap<>();
         methods.put("equal_weight", h -> {
             double[] w = new double[h[0].length];
@@ -156,17 +180,31 @@ public final class Demo {
         });
         methods.put("min_var_lo", h -> Markowitz.minVarianceLongOnly(
                 Estimators.annualizeCov(Estimators.sampleCov(h), annualization)));
+        methods.put("min_var_tc", h -> {
+            // Long-only min variance with turnover penalty kappa = 3e-5 against
+            // the previous target (equal weight before the first rebalance).
+            double[] w0 = prevTc[0];
+            if (w0 == null) {
+                w0 = new double[h[0].length];
+                java.util.Arrays.fill(w0, 1.0 / h[0].length);
+            }
+            double[] w = Markowitz.minVarianceTurnover(
+                    Estimators.annualizeCov(Estimators.sampleCov(h), annualization), w0, 3e-5);
+            prevTc[0] = w;
+            return w;
+        });
         methods.put("tangency", h -> {
             // Pinned backtest method: tangency, falling back to unconstrained
-            // min-variance where tangency is undefined or ill-conditioned —
-            // reported, not crashed (API_SPEC 6.3). Any other error (e.g. a
-            // singular covariance) propagates.
+            // min-variance where tangency is undefined (rf at or above A/C) or
+            // above the gross-leverage cap, reported, not crashed (API_SPEC 6.3).
+            // Any other error (e.g. a singular covariance) propagates.
             double[][] s = Estimators.annualizeCov(Estimators.sampleCov(h), annualization);
+            double[] m = Estimators.annualizeMean(Estimators.sampleMean(h), annualization);
             try {
-                return Markowitz.tangencyWeights(
-                        Estimators.annualizeMean(Estimators.sampleMean(h), annualization), s, rf);
+                return Markowitz.tangencyWeights(m, s, rf);
             } catch (Markowitz.TangencyUndefinedException e) {
-                fallbacks[0]++;
+                Markowitz.TwoFundScalars sc = Markowitz.twoFundScalars(m, s);
+                fallbacks[sc.a() - rf * sc.c() <= 0.0 ? 0 : 1]++;
                 return Markowitz.minVarianceWeights(s);
             }
         });
@@ -185,11 +223,16 @@ public final class Demo {
             System.out.printf("%-14s%9.4f%9.4f%9.4f%9.4f%11.4f%n", e.getKey(),
                     r.annReturn(), r.annVol(), r.sharpe(), r.maxDrawdown(), r.avgTurnover());
         }
-        if (fallbacks[0] > 0) {
-            System.out.printf("note: tangency undefined/ill-conditioned at %d rebalance date(s) "
-                    + "(rf at or above the min-var return); fell back to min-variance there.%n",
-                    fallbacks[0]);
+        int nFb = fallbacks[0] + fallbacks[1];
+        if (nFb > 0) {
+            System.out.printf("note: tangency fell back to min-variance at %d rebalance date(s): "
+                    + "%d with rf at or above the min-var return A/C, %d above the %sx "
+                    + "gross-leverage cap.%n", nFb, fallbacks[0], fallbacks[1],
+                    new java.math.BigDecimal(Markowitz.TANGENCY_MAX_LEVERAGE)
+                            .stripTrailingZeros().toPlainString());
         }
+        System.out.println("min_var_tc = min_var_lo with turnover penalty kappa = 3e-5 against "
+                + "the previous target.");
 
         System.out.println("\ndemo complete.");
     }

@@ -25,8 +25,8 @@ import java.util.List;
  * {@code h = (C*x - A*y)/D}. Special points: minimum variance
  * {@code w_mv = y/C} (return A/C, variance 1/C); tangency
  * {@code w_tan = Sigma^-1 (mu - rf 1) / (A - rf C)}, defined only when
- * {@code A - rf C > 0} and rejected as ill-conditioned when that difference
- * is within a relative 1e-6 of cancelling.
+ * {@code A - rf C > 0} and rejected as ill-conditioned when its gross
+ * leverage exceeds a cap (default {@link #TANGENCY_MAX_LEVERAGE} = 10).
  *
  * <p>Constrained problems (sum-to-one, optional target return, box bounds)
  * are strictly convex QPs solved by the finite dual active-set method of
@@ -34,6 +34,11 @@ import java.util.List;
  * (API_SPEC.md section 3.6). The result is the KKT point of the QP up to
  * rounding, so all ports agree to ~1e-13 and {@code converged} is a statement
  * about the KKT conditions, not about an iterate step size.
+ *
+ * <p>Cost-aware problems {@code min 1/2 w'Sw - c'w + kappa sum|w - w0|} over
+ * the same box-simplex, optionally with a turnover cap, run the same dual
+ * active-set method on an exactly equivalent strictly convex split problem in
+ * {@code (w, b, s)} (API_SPEC.md section 3.7).
  */
 public final class Markowitz {
 
@@ -47,16 +52,17 @@ public final class Markowitz {
     public static final double QP_DEGENERATE_TOL = 1.0e-9;
     /** Pinned KKT certificate tolerance (relative) for {@code converged}. */
     public static final double QP_CONV_TOL = 1.0e-9;
-    /** Pinned relative conditioning threshold for the tangency denominator. */
-    public static final double TANGENCY_COND_RTOL = 1.0e-6;
+    /** Pinned default cap on the gross leverage sum_i |w_i| of the unconstrained
+     *  tangency portfolio (API_SPEC 3.3). */
+    public static final double TANGENCY_MAX_LEVERAGE = 10.0;
 
     private Markowitz() {
     }
 
     /**
      * Thrown when the tangency portfolio is undefined ({@code A - rf*C <= 0})
-     * or ill-conditioned ({@code A - rf*C} within a relative
-     * {@link #TANGENCY_COND_RTOL} of cancelling). Extends
+     * or ill-conditioned (gross leverage above the cap, default
+     * {@link #TANGENCY_MAX_LEVERAGE}). Extends
      * {@link IllegalArgumentException} so generic handlers still work; the
      * demo's pinned fallback catches exactly this type.
      */
@@ -183,25 +189,43 @@ public final class Markowitz {
     }
 
     /**
-     * Tangency (max-Sharpe) weights {@code Sigma^-1 (mu - rf 1) / (A - rf C)}.
+     * Tangency (max-Sharpe) weights with the default gross-leverage cap
+     * {@link #TANGENCY_MAX_LEVERAGE}; see {@link #tangencyWeights(double[], double[][], double, double)}.
      *
      * @param mu    expected returns
      * @param sigma SPD covariance
      * @param rf    risk-free rate (finite)
      * @return tangency weights summing to 1
-     * @throws TangencyUndefinedException if
-     *         {@code A - rf*C <= TANGENCY_COND_RTOL * max(|A|, |rf|*C)}: the
-     *         tangency portfolio is undefined when the risk-free rate is at or
-     *         above the minimum-variance return A/C (in particular when rf
-     *         exceeds every expected return) and numerically meaningless when
-     *         rf sits within a relative 1e-6 of A/C (weights scale like
-     *         1/(A - rf C) and reach gross leverage of 1e6+)
-     * @throws IllegalArgumentException on malformed inputs (non-finite rf, ...)
      */
     public static double[] tangencyWeights(double[] mu, double[][] sigma, double rf) {
+        return tangencyWeights(mu, sigma, rf, TANGENCY_MAX_LEVERAGE);
+    }
+
+    /**
+     * Tangency (max-Sharpe) weights {@code Sigma^-1 (mu - rf 1) / (A - rf C)}.
+     *
+     * @param mu          expected returns
+     * @param sigma       SPD covariance
+     * @param rf          risk-free rate (finite)
+     * @param maxLeverage cap on the gross leverage sum_i |w_i| (&ge; 1; +inf disables it)
+     * @return tangency weights summing to 1
+     * @throws TangencyUndefinedException if {@code A - rf*C <= 0} (rf at or
+     *         above the minimum-variance return A/C, in particular above every
+     *         expected return) or if the gross leverage exceeds
+     *         {@code maxLeverage} (weights scale like 1/(A - rf C), so rf just
+     *         below A/C gives an allocation that is an artefact of the
+     *         estimate of A/C)
+     * @throws IllegalArgumentException on malformed inputs (non-finite rf,
+     *         maxLeverage below 1 or NaN, ...)
+     */
+    public static double[] tangencyWeights(double[] mu, double[][] sigma, double rf,
+            double maxLeverage) {
         validateMuSigma(mu, sigma);
         if (!Double.isFinite(rf)) {
             throw new IllegalArgumentException("rf must be finite");
+        }
+        if (Double.isNaN(maxLeverage) || maxLeverage < 1.0) {
+            throw new IllegalArgumentException("max_leverage must be >= 1 (got " + maxLeverage + ")");
         }
         if (sigma.length == 1) {
             validate1x1(sigma);
@@ -223,22 +247,17 @@ public final class Markowitz {
                     "tangency undefined: A - rf*C <= 0 (risk-free rate is at or above "
                             + "the minimum-variance portfolio return)");
         }
-        // Conditioning guard: A - rf*C is a difference of two O(A) numbers.
-        double[] ones = new double[mu.length];
-        Arrays.fill(ones, 1.0);
-        double a = Linalg.sum(Linalg.cholSolve(low, mu));
-        double c = Linalg.sum(Linalg.cholSolve(low, ones));
-        double scale = Math.max(Math.abs(a), Math.abs(rf) * c);
-        if (denom <= TANGENCY_COND_RTOL * scale) {
-            throw new TangencyUndefinedException(String.format(
-                    "tangency ill-conditioned: A - rf*C = %.3e is within a relative %g of "
-                            + "cancelling (rf within %g of the minimum-variance return %.6g); "
-                            + "weights would carry gross leverage of order 1e6 or more",
-                    denom, TANGENCY_COND_RTOL, TANGENCY_COND_RTOL, a / c));
-        }
         double[] w = new double[z.length];
         for (int i = 0; i < z.length; i++) {
             w[i] = z[i] / denom;
+        }
+        double lev = grossLeverage(w);
+        if (lev > maxLeverage) {
+            throw new TangencyUndefinedException(String.format(java.util.Locale.ROOT,
+                    "tangency ill-conditioned: gross leverage %.4g exceeds max_leverage %g "
+                            + "(A - rf*C = %.3e; rf is too close below the minimum-variance "
+                            + "return A/C)",
+                    lev, maxLeverage, denom));
         }
         return w;
     }
@@ -630,7 +649,7 @@ public final class Markowitz {
 
     // --------------------------------------------------------------------- QP
 
-    private enum Kind { EQUALITY, LOWER, UPPER, FIXED }
+    private enum Kind { EQUALITY, LOWER, UPPER, FIXED, INEQUALITY }
 
     private record Constraint(Kind kind, int idx, double rhs, double[] normal) {
     }
@@ -641,15 +660,21 @@ public final class Markowitz {
         return e;
     }
 
+    /** Final state of the dual active-set loop. */
+    private record GiState(double[] w, List<Integer> active, List<Double> u, int iterations,
+            List<Constraint> cons, int meq, double[][] low) {
+    }
+
     /**
-     * Goldfarb-Idnani dual active-set method for min 1/2 w'Sw s.t. aEq w = bEq,
-     * lo &le; w &le; hi (API_SPEC 3.6). Constraints are n_c'w &ge; b_c: the
-     * equalities (rows of aEq, then every fixed coordinate lo_i == hi_i; added
-     * first, multipliers unrestricted), then the lower bounds and the finite
-     * upper bounds of the non-fixed coordinates.
+     * Goldfarb-Idnani loop for min 1/2 x'Sx - lin'x s.t. aEq x = bEq,
+     * aIn x &ge; bIn, lo &le; x &le; hi (API_SPEC 3.6, 3.7). {@code lin == null}
+     * means no linear term (start at x = 0); otherwise the loop starts at the
+     * unconstrained minimizer S^-1 lin and is unchanged (the step directions do
+     * not depend on lin). Constraint order: equality rows, fixed coordinates,
+     * lower bounds, finite upper bounds, inequality rows.
      */
-    private static QpResult dualActiveSetQp(double[][] s, double[][] aEq, double[] bEq,
-            double[] lo, double[] hi, int maxIter) {
+    private static GiState giLoop(double[][] s, double[] lin, double[][] aEq, double[] bEq,
+            double[][] aIn, double[] bIn, double[] lo, double[] hi, int maxIter) {
         int n = s.length;
         double[][] low = Linalg.cholesky(s);
         List<Constraint> cons = new ArrayList<>();
@@ -672,9 +697,12 @@ public final class Markowitz {
                 cons.add(new Constraint(Kind.UPPER, i, -hi[i], unit(n, i, -1.0)));
             }
         }
+        for (int j = 0; j < aIn.length; j++) {
+            cons.add(new Constraint(Kind.INEQUALITY, j, bIn[j], aIn[j].clone()));
+        }
         int nCons = cons.size();
 
-        double[] w = new double[n];
+        double[] w = lin == null ? new double[n] : Linalg.cholSolve(low, lin);
         List<Integer> active = new ArrayList<>();
         List<Double> u = new ArrayList<>();
         boolean[] skipped = new boolean[nCons];
@@ -790,6 +818,27 @@ public final class Markowitz {
                 u.remove(jBlock);
             }
         }
+        return new GiState(w, active, u, iterations, cons, meq, low);
+    }
+
+    /**
+     * Goldfarb-Idnani dual active-set method for min 1/2 w'Sw s.t. aEq w = bEq,
+     * lo &le; w &le; hi (API_SPEC 3.6). Constraints are n_c'w &ge; b_c: the
+     * equalities (rows of aEq, then every fixed coordinate lo_i == hi_i; added
+     * first, multipliers unrestricted), then the lower bounds and the finite
+     * upper bounds of the non-fixed coordinates.
+     */
+    private static QpResult dualActiveSetQp(double[][] s, double[][] aEq, double[] bEq,
+            double[] lo, double[] hi, int maxIter) {
+        int n = s.length;
+        GiState st = giLoop(s, null, aEq, bEq, new double[0][], new double[0], lo, hi, maxIter);
+        double[][] low = st.low();
+        List<Constraint> cons = st.cons();
+        int meq = st.meq();
+        int nCons = cons.size();
+        double[] w = st.w();
+        List<Integer> active = st.active();
+        int iterations = st.iterations();
         // Polish: minimizer on the final active set in closed form,
         // w = S^-1 N u with (N' S^-1 N) u = b_active, plus one step of iterative
         // refinement on the equality residual.
@@ -1148,5 +1197,462 @@ public final class Markowitz {
      */
     public static Frontier constrainedFrontier(double[] mu, double[][] sigma, int nPoints) {
         return constrainedFrontier(mu, sigma, nPoints, null, null);
+    }
+
+    // ------------------------------------------------------------ cost-aware QP
+
+    /**
+     * Output of the cost-aware (turnover-penalised) QP solvers.
+     *
+     * @param weights     feasible weights (bounds exact, budget to rounding)
+     * @param iterations  dual active-set iterations on the split problem
+     * @param converged   KKT certificate of the original nonsmooth problem holds
+     *                    (primal feasibility incl. the cap, stationarity with an L1
+     *                    subgradient, cap multiplier &ge; 0, complementarity)
+     * @param kktResidual largest violation found by that certificate
+     * @param turnover    sum_i |w_i - w0_i| of {@code weights} (compensated sum)
+     */
+    public record TurnoverQpResult(double[] weights, int iterations, boolean converged,
+            double kktResidual, double turnover) {
+    }
+
+    private static double absDiffSum(double[] w, double[] w0) {
+        double[] a = new double[w.length];
+        for (int i = 0; i < w.length; i++) {
+            a[i] = Math.abs(w[i] - w0[i]);
+        }
+        return Linalg.kahanSum(a);
+    }
+
+    private static double clip(double v, double lo, double hi) {
+        return Math.min(Math.max(v, lo), hi);
+    }
+
+    /**
+     * KKT certificate of min 1/2 w'Sw - c'w + kappa sum|w - w0| over
+     * {sum w = 1, lo &le; w &le; hi, sum|w - w0| &le; cap} at {@code w} with budget
+     * multiplier nu and cap multiplier tau (API_SPEC 3.7): with k = kappa + tau
+     * and g = S w - c - nu 1, -g_i must lie in the subdifferential of
+     * k |w_i - w0_i| plus the box indicator; tau &ge; 0; tau &gt; 0 only with a
+     * binding cap. Package-private for testing.
+     */
+    static KktCertificate turnoverCertificate(double[][] s, double[] c, double[] w0,
+            double kappa, double[] lo, double[] hi, double cap, double nu, double tau,
+            double[] w) {
+        int n = w.length;
+        double k = kappa + tau;
+        double rhsScale = 1.0;
+        for (int i = 0; i < n; i++) {
+            rhsScale = Math.max(rhsScale, Math.max(Math.abs(w0[i]), Math.abs(lo[i])));
+            if (Double.isFinite(hi[i])) {
+                rhsScale = Math.max(rhsScale, Math.abs(hi[i]));
+            }
+        }
+        if (Double.isFinite(cap)) {
+            rhsScale = Math.max(rhsScale, cap);
+        }
+        double turnover = absDiffSum(w, w0);
+        double feas = Math.abs(Linalg.kahanSum(w) - 1.0);
+        for (int i = 0; i < n; i++) {
+            feas = Math.max(feas, Math.max(lo[i] - w[i], w[i] - hi[i]));
+        }
+        if (Double.isFinite(cap)) {
+            feas = Math.max(feas, turnover - cap);
+        }
+        double[] sw = Linalg.matVec(s, w);
+        double swMax = 0.0;
+        double cMax = 0.0;
+        for (int i = 0; i < n; i++) {
+            swMax = Math.max(swMax, Math.abs(sw[i]));
+            cMax = Math.max(cMax, Math.abs(c[i]));
+        }
+        double statScale = Math.abs(nu) + k + swMax + cMax;
+        double statTol = QP_CONV_TOL * (1.0 + statScale);
+        double dual = Math.max(0.0, -tau);
+        if (tau > statTol && Double.isFinite(cap)) {
+            feas = Math.max(feas, cap - turnover); // complementarity
+        }
+        for (int i = 0; i < n; i++) {
+            double d = w[i] - w0[i];
+            boolean atLo = w[i] <= lo[i] + QP_CONV_TOL * (1.0 + Math.abs(lo[i]));
+            boolean atHi = Double.isFinite(hi[i])
+                    && w[i] >= hi[i] - QP_CONV_TOL * (1.0 + Math.abs(hi[i]));
+            boolean atW0 = Math.abs(d) <= QP_CONV_TOL * (1.0 + Math.abs(w0[i]));
+            double xi = -(sw[i] - c[i] - nu);
+            if (!atLo) {
+                double sLeft = (atW0 || d < 0.0) ? -k : k;
+                dual = Math.max(dual, sLeft - xi);
+            }
+            if (!atHi) {
+                double sRight = (atW0 || d > 0.0) ? k : -k;
+                dual = Math.max(dual, xi - sRight);
+            }
+        }
+        boolean certified = feas <= QP_CONV_TOL * (1.0 + rhsScale) && dual <= statTol;
+        return new KktCertificate(certified, Math.max(feas, dual));
+    }
+
+    /** Pinned cost-aware QP (API_SPEC 3.7); inputs already validated. */
+    private static TurnoverQpResult turnoverQp(double[][] s, double[] c, double[] w0,
+            double kappa, double[] lo, double[] hi, double cap, int maxIter) {
+        int n = s.length;
+        if (n == 1) {
+            return new TurnoverQpResult(new double[] {1.0}, 0, true, 0.0, Math.abs(1.0 - w0[0]));
+        }
+        double[][] low = Linalg.cholesky(s);
+        // eps = 0.5 / trace(S^-1) <= lambda_min(S) / 2 keeps S - eps I SPD; the
+        // split problem is exactly equivalent for any 0 < eps < lambda_min(S).
+        double tr = 0.0;
+        for (int j = 0; j < n; j++) {
+            double[] e = new double[n];
+            e[j] = 1.0;
+            tr += Linalg.cholSolve(low, e)[j];
+        }
+        double eps = 0.5 / tr;
+        int m = 3 * n;
+        double[][] h = new double[m][m];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                h[i][j] = s[i][j];
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            h[i][i] = s[i][i] - eps;
+            h[n + i][n + i] = eps;
+            h[2 * n + i][2 * n + i] = eps;
+        }
+        double[] lin = new double[m];
+        for (int i = 0; i < n; i++) {
+            lin[i] = c[i] - eps * w0[i];
+            lin[n + i] = -kappa;
+            lin[2 * n + i] = -kappa;
+        }
+        double[][] aEq = new double[n + 1][m];
+        double[] bEq = new double[n + 1];
+        for (int i = 0; i < n; i++) {
+            aEq[0][i] = 1.0;
+        }
+        bEq[0] = 1.0;
+        for (int i = 0; i < n; i++) {
+            aEq[1 + i][i] = 1.0;
+            aEq[1 + i][n + i] = -1.0;
+            aEq[1 + i][2 * n + i] = 1.0;
+            bEq[1 + i] = w0[i];
+        }
+        double[] lo3 = new double[m];
+        double[] hi3 = new double[m];
+        Arrays.fill(hi3, Double.POSITIVE_INFINITY);
+        for (int i = 0; i < n; i++) {
+            lo3[i] = lo[i];
+            hi3[i] = hi[i];
+        }
+        double[][] aIn = new double[0][];
+        double[] bIn = new double[0];
+        if (Double.isFinite(cap)) {
+            double[] row = new double[m];
+            for (int k = n; k < m; k++) {
+                row[k] = -1.0;
+            }
+            aIn = new double[][] {row};
+            bIn = new double[] {-cap};
+        }
+        GiState st = giLoop(h, lin, aEq, bEq, aIn, bIn, lo3, hi3, maxIter);
+
+        // States from the active set (fixed at a bound, held at w0, or free on
+        // the buy / sell side).
+        boolean[] atLo = new boolean[n];
+        boolean[] atHi = new boolean[n];
+        boolean[] bAct = new boolean[n];
+        boolean[] sAct = new boolean[n];
+        boolean capAct = false;
+        for (int i = 0; i < n; i++) {
+            atLo[i] = lo[i] == hi[i];
+        }
+        for (int cidx : st.active()) {
+            Constraint con = st.cons().get(cidx);
+            if (con.kind() == Kind.INEQUALITY) {
+                capAct = true;
+            } else if (con.kind() == Kind.UPPER) {
+                atHi[con.idx()] = true;
+            } else if (con.kind() == Kind.LOWER || con.kind() == Kind.FIXED) {
+                if (con.idx() < n) {
+                    atLo[con.idx()] = true;
+                } else if (con.idx() < 2 * n) {
+                    bAct[con.idx() - n] = true;
+                } else {
+                    sAct[con.idx() - 2 * n] = true;
+                }
+            }
+        }
+        boolean[] isFixed = new boolean[n];
+        double[] fixVal = new double[n];
+        double[] sgn = new double[n];
+        double[] x = st.w();
+        for (int i = 0; i < n; i++) {
+            if (atLo[i]) {
+                isFixed[i] = true;
+                fixVal[i] = lo[i];
+            } else if (atHi[i]) {
+                isFixed[i] = true;
+                fixVal[i] = hi[i];
+            } else if (bAct[i] && sAct[i]) {
+                isFixed[i] = true;
+                fixVal[i] = w0[i];
+            } else if (sAct[i]) {
+                sgn[i] = 1.0;
+            } else if (bAct[i]) {
+                sgn[i] = -1.0;
+            } else {
+                sgn[i] = (x[n + i] - x[2 * n + i] >= 0.0) ? 1.0 : -1.0;
+            }
+        }
+
+        // Exact polish in w alone on the face {sum w = 1, [cap row], w_i = fix_i}.
+        List<double[]> normals = new ArrayList<>();
+        List<Double> rhs = new ArrayList<>();
+        normals.add(ones(n));
+        rhs.add(1.0);
+        if (capAct) {
+            double bCap = -cap;
+            double[] row = new double[n];
+            for (int i = 0; i < n; i++) {
+                row[i] = -sgn[i];
+                if (isFixed[i]) {
+                    bCap += Math.abs(fixVal[i] - w0[i]);
+                } else {
+                    bCap -= sgn[i] * w0[i];
+                }
+            }
+            normals.add(row);
+            rhs.add(bCap);
+        }
+        for (int i = 0; i < n; i++) {
+            if (isFixed[i]) {
+                normals.add(unit(n, i, 1.0));
+                rhs.add(fixVal[i]);
+            }
+        }
+        double[] cEff = new double[n];
+        for (int i = 0; i < n; i++) {
+            cEff[i] = c[i] - kappa * sgn[i];
+        }
+        double[] x0 = Linalg.cholSolve(low, cEff);
+        int q = normals.size();
+        double[][] ys = new double[q][];
+        for (int i = 0; i < q; i++) {
+            ys[i] = Linalg.cholSolve(low, normals.get(i));
+        }
+        double[][] gram = new double[q][q];
+        for (int i = 0; i < q; i++) {
+            for (int j = i; j < q; j++) {
+                gram[i][j] = Linalg.dot(normals.get(i), ys[j]);
+                gram[j][i] = gram[i][j];
+            }
+        }
+        double[][] lowG;
+        try {
+            lowG = Linalg.cholesky(gram);
+        } catch (IllegalArgumentException ex) {
+            // Dependent face rows: the loop iterate is returned uncertified.
+            double[] wBad = new double[n];
+            for (int k = 0; k < n; k++) {
+                wBad[k] = clip(x[k], lo[k], hi[k]);
+            }
+            return new TurnoverQpResult(wBad, st.iterations(), false, Double.POSITIVE_INFINITY,
+                    absDiffSum(wBad, w0));
+        }
+        double[] rb = new double[q];
+        for (int i = 0; i < q; i++) {
+            rb[i] = rhs.get(i) - Linalg.dot(normals.get(i), x0);
+        }
+        double[] uArr = Linalg.cholSolve(lowG, rb);
+        double[] w = x0.clone();
+        for (int i = 0; i < q; i++) {
+            for (int k = 0; k < n; k++) {
+                w[k] += uArr[i] * ys[i][k];
+            }
+        }
+        double[] resid = new double[q];
+        for (int i = 0; i < q; i++) {
+            resid[i] = rhs.get(i) - Linalg.dot(normals.get(i), w);
+        }
+        double[] du = Linalg.cholSolve(lowG, resid);
+        for (int i = 0; i < q; i++) {
+            for (int k = 0; k < n; k++) {
+                w[k] += du[i] * ys[i][k];
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            if (isFixed[i]) {
+                w[i] = fixVal[i];
+            }
+        }
+        double nu = uArr[0] + du[0];
+        double tau = capAct ? uArr[1] + du[1] : 0.0;
+        KktCertificate cert = turnoverCertificate(s, c, w0, kappa, lo, hi, cap, nu, tau, w);
+        for (int k = 0; k < n; k++) {
+            w[k] = clip(w[k], lo[k], hi[k]);
+        }
+        return new TurnoverQpResult(w, st.iterations(), cert.certified(), cert.residual(),
+                absDiffSum(w, w0));
+    }
+
+    /** Shared validation of the cost-aware entry points (API_SPEC 3.7). */
+    private static double[][] turnoverSetup(double[][] sigma, double[] w0, double kappa,
+            double[] lb, double[] ub, double maxTurnover, int maxIter) {
+        double[][] bounds = qpSetup(sigma, lb, ub, maxIter);
+        int n = sigma.length;
+        if (w0 == null || w0.length != n) {
+            throw new IllegalArgumentException("w0 length " + (w0 == null ? 0 : w0.length)
+                    + " does not match sigma dimension " + n);
+        }
+        for (double v : w0) {
+            if (!Double.isFinite(v)) {
+                throw new IllegalArgumentException("w0 contains NaN or infinite entries");
+            }
+        }
+        if (!Double.isFinite(kappa) || kappa < 0.0) {
+            throw new IllegalArgumentException("kappa must be finite and >= 0 (got " + kappa + ")");
+        }
+        if (Double.isNaN(maxTurnover) || maxTurnover < 0.0) {
+            throw new IllegalArgumentException(
+                    "max_turnover must be >= 0 (got " + maxTurnover + ")");
+        }
+        if (Double.isFinite(maxTurnover)) {
+            // Smallest attainable turnover: clip w0 into the box, then move the
+            // budget gap |1 - sum(clip)|; no feasible portfolio does better.
+            double[] wc = new double[n];
+            for (int i = 0; i < n; i++) {
+                wc[i] = clip(w0[i], bounds[0][i], bounds[1][i]);
+            }
+            double toMin = absDiffSum(wc, w0) + Math.abs(1.0 - Linalg.kahanSum(wc));
+            if (maxTurnover < toMin - 1e-12 * (1.0 + toMin)) {
+                throw new IllegalArgumentException("infeasible turnover cap: max_turnover = "
+                        + maxTurnover + " is below the smallest attainable turnover " + toMin);
+            }
+        }
+        return bounds;
+    }
+
+    private static double[] requireTurnoverConverged(TurnoverQpResult res, String what) {
+        if (!res.converged()) {
+            throw new IllegalArgumentException(String.format(java.util.Locale.ROOT,
+                    "%s: cost-aware QP not certified after %d iterations (KKT residual %.3e); "
+                            + "the input is degenerate, use the *Solve variant to inspect the iterate",
+                    what, res.iterations(), res.kktResidual()));
+        }
+        return res.weights();
+    }
+
+    /**
+     * Cost-aware minimum variance (API_SPEC 3.7):
+     * {@code min 1/2 w'Sw + kappa sum_i |w_i - w0_i|} s.t. sum w = 1,
+     * lb &le; w &le; ub and, when {@code maxTurnover} is finite,
+     * {@code sum_i |w_i - w0_i| <= maxTurnover}. Solved by the dual active-set QP
+     * on the split problem w = w0 + b - s with Hessian
+     * diag(S - eps I, eps I, eps I), eps = 0.5 / trace(S^-1), which is strictly
+     * convex and exactly equivalent (no perturbation), then re-polished in w on
+     * the identified face and certified.
+     *
+     * @param sigma       SPD covariance
+     * @param w0          current portfolio (finite, length n)
+     * @param kappa       cost per unit of two-sided turnover, variance units (&ge; 0)
+     * @param lb          lower bounds (null = 0; length 1 broadcasts)
+     * @param ub          upper bounds (null = +inf; length 1 broadcasts)
+     * @param maxTurnover turnover cap (+inf = none)
+     * @param maxIter     iteration cap (pinned default {@link #QP_MAX_ITER})
+     * @return weights, iterations, certificate, KKT residual and turnover
+     * @throws IllegalArgumentException on invalid input, infeasible bounds or a
+     *         cap below the smallest attainable turnover
+     */
+    public static TurnoverQpResult minVarianceTurnoverSolve(double[][] sigma, double[] w0,
+            double kappa, double[] lb, double[] ub, double maxTurnover, int maxIter) {
+        double[][] bounds = turnoverSetup(sigma, w0, kappa, lb, ub, maxTurnover, maxIter);
+        return turnoverQp(sigma, new double[sigma.length], w0, kappa, bounds[0], bounds[1],
+                maxTurnover, maxIter);
+    }
+
+    /**
+     * Weights of {@link #minVarianceTurnoverSolve} with the pinned iteration cap.
+     *
+     * @param sigma       SPD covariance
+     * @param w0          current portfolio
+     * @param kappa       turnover penalty (&ge; 0)
+     * @param lb          lower bounds (null = 0)
+     * @param ub          upper bounds (null = +inf)
+     * @param maxTurnover turnover cap (+inf = none)
+     * @return certified weights
+     * @throws IllegalArgumentException also when the KKT certificate fails
+     */
+    public static double[] minVarianceTurnover(double[][] sigma, double[] w0, double kappa,
+            double[] lb, double[] ub, double maxTurnover) {
+        return requireTurnoverConverged(
+                minVarianceTurnoverSolve(sigma, w0, kappa, lb, ub, maxTurnover, QP_MAX_ITER),
+                "minVarianceTurnover");
+    }
+
+    /**
+     * Long-only, uncapped {@link #minVarianceTurnover(double[][], double[], double, double[], double[], double)}.
+     *
+     * @param sigma SPD covariance
+     * @param w0    current portfolio
+     * @param kappa turnover penalty (&ge; 0)
+     * @return certified weights
+     */
+    public static double[] minVarianceTurnover(double[][] sigma, double[] w0, double kappa) {
+        return minVarianceTurnover(sigma, w0, kappa, null, null, Double.POSITIVE_INFINITY);
+    }
+
+    /**
+     * Cost-aware mean-variance (API_SPEC 3.7):
+     * {@code min 1/2 w'Sw - mu'w / riskAversion + kappa sum_i |w_i - w0_i|} over
+     * the same feasible set. Same method and certificate as
+     * {@link #minVarianceTurnoverSolve}.
+     *
+     * @param mu           expected returns
+     * @param sigma        SPD covariance
+     * @param w0           current portfolio
+     * @param riskAversion risk aversion (&gt; 0)
+     * @param kappa        turnover penalty (&ge; 0)
+     * @param lb           lower bounds (null = 0)
+     * @param ub           upper bounds (null = +inf)
+     * @param maxTurnover  turnover cap (+inf = none)
+     * @param maxIter      iteration cap
+     * @return weights, iterations, certificate, KKT residual and turnover
+     */
+    public static TurnoverQpResult meanVarianceTurnoverSolve(double[] mu, double[][] sigma,
+            double[] w0, double riskAversion, double kappa, double[] lb, double[] ub,
+            double maxTurnover, int maxIter) {
+        validateMuSigma(mu, sigma);
+        if (!Double.isFinite(riskAversion) || riskAversion <= 0.0) {
+            throw new IllegalArgumentException(
+                    "risk_aversion must be finite and > 0 (got " + riskAversion + ")");
+        }
+        double[][] bounds = turnoverSetup(sigma, w0, kappa, lb, ub, maxTurnover, maxIter);
+        double[] c = new double[mu.length];
+        for (int i = 0; i < mu.length; i++) {
+            c[i] = mu[i] / riskAversion;
+        }
+        return turnoverQp(sigma, c, w0, kappa, bounds[0], bounds[1], maxTurnover, maxIter);
+    }
+
+    /**
+     * Weights of {@link #meanVarianceTurnoverSolve} with the pinned iteration cap.
+     *
+     * @param mu           expected returns
+     * @param sigma        SPD covariance
+     * @param w0           current portfolio
+     * @param riskAversion risk aversion (&gt; 0)
+     * @param kappa        turnover penalty (&ge; 0)
+     * @param lb           lower bounds (null = 0)
+     * @param ub           upper bounds (null = +inf)
+     * @param maxTurnover  turnover cap (+inf = none)
+     * @return certified weights
+     * @throws IllegalArgumentException also when the KKT certificate fails
+     */
+    public static double[] meanVarianceTurnover(double[] mu, double[][] sigma, double[] w0,
+            double riskAversion, double kappa, double[] lb, double[] ub, double maxTurnover) {
+        return requireTurnoverConverged(meanVarianceTurnoverSolve(mu, sigma, w0, riskAversion,
+                kappa, lb, ub, maxTurnover, QP_MAX_ITER), "meanVarianceTurnover");
     }
 }

@@ -4,7 +4,10 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstddef>
 #include <limits>
+#include <stdexcept>
+#include <vector>
 
 #include "portopt/backtest.hpp"
 #include "test_data.hpp"
@@ -164,4 +167,45 @@ TEST(Backtest, RebalanceIndicesHugeStepTerminates) {
   EXPECT_EQ(portopt::rebalance_indices(1250, 500, 750), std::vector<std::size_t>{500});
   EXPECT_EQ(portopt::rebalance_indices(1251, 500, 750), (std::vector<std::size_t>{500, 1250}));
   EXPECT_EQ(portopt::rebalance_indices(1250, 500, 1).size(), 750u);
+}
+
+TEST(Backtest, HistoryViewOverloadMatchesMatrixOverload) {
+  // The non-owning view overload and the copying Matrix overload give
+  // bit-identical results, and the view sees exactly rows [0, t_k).
+  const Matrix& x = testdata::returns_data().returns;
+  std::vector<std::size_t> seen_rows;
+  const auto by_view = [&seen_rows, &x](const portopt::HistoryView& h) {
+    seen_rows.push_back(h.rows());
+    EXPECT_EQ(h.cols(), x.cols());
+    EXPECT_EQ(h(h.rows() - 1, 0), x(h.rows() - 1, 0));
+    // A tilt that depends on the history, so the weights move.
+    Vector w(h.cols(), 0.0);
+    double total = 0.0;
+    for (std::size_t c = 0; c < h.cols(); ++c) {
+      w[c] = 1.0 + 10.0 * std::fabs(h(h.rows() - 1, c));
+      total += w[c];
+    }
+    for (double& v : w) v /= total;
+    return w;
+  };
+  const auto by_copy = [&by_view](const Matrix& h) {
+    return by_view(portopt::HistoryView(h, h.rows()));
+  };
+  const portopt::BacktestResult a = portopt::run_backtest(x, by_view, 0.01, 500, 63);
+  const portopt::BacktestResult b = portopt::run_backtest(x, by_copy, 0.01, 500, 63);
+  EXPECT_EQ(a.portfolio_returns, b.portfolio_returns);
+  EXPECT_EQ(a.turnovers, b.turnovers);
+  EXPECT_EQ(a.sharpe, b.sharpe);
+  EXPECT_EQ(a.max_drawdown, b.max_drawdown);
+  EXPECT_GT(a.avg_turnover, 0.0);
+  ASSERT_EQ(seen_rows.size(), 2 * a.rebalance_dates.size());
+  for (std::size_t i = 0; i < a.rebalance_dates.size(); ++i) {
+    EXPECT_EQ(seen_rows[i], a.rebalance_dates[i]);
+  }
+  // to_matrix() copies exactly the viewed rows; a view longer than the
+  // matrix is rejected.
+  const Matrix head = portopt::HistoryView(x, 3).to_matrix();
+  ASSERT_EQ(head.rows(), 3u);
+  EXPECT_EQ(head(2, x.cols() - 1), x(2, x.cols() - 1));
+  EXPECT_THROW((void)portopt::HistoryView(x, x.rows() + 1), std::invalid_argument);
 }

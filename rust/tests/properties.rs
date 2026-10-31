@@ -129,17 +129,37 @@ fn tangency_rf_above_all_returns_rejected() {
 
 #[test]
 fn tangency_near_gmv_rejected() {
-    // MAJ-1: rf within 1e-6 (relative) of A/C cancels A - rf*C catastrophically.
+    // Gross leverage scales like 1 / (A/C - rf): the guard rejects any
+    // tangency above max_leverage (default 10), from rf within rounding of
+    // A/C up to merely close to it; rf = 0.02 on the full sample passes.
     let c = ctx();
     let sc = po::two_fund_scalars(&c.mu, &c.sig).unwrap();
     let r_gmv = sc.a / sc.c;
-    for eps in [1e-13, 1e-9] {
+    for gap in [1e-13, 1e-9, 1e-3] {
         assert!(matches!(
-            po::tangency_weights(&c.mu, &c.sig, r_gmv - eps),
+            po::tangency_weights(&c.mu, &c.sig, r_gmv - gap),
             Err(PortOptError::TangencyUndefined(_))
         ));
     }
-    let w = po::tangency_weights(&c.mu, &c.sig, r_gmv - 1e-3).unwrap();
+    let lev02 = po::gross_leverage(&po::tangency_weights(&c.mu, &c.sig, RF).unwrap()).unwrap();
+    assert!((1.0..=po::TANGENCY_MAX_LEVERAGE).contains(&lev02));
+    assert!(po::tangency_weights_capped(&c.mu, &c.sig, RF, lev02).is_ok());
+    assert!(matches!(
+        po::tangency_weights_capped(&c.mu, &c.sig, RF, lev02 * (1.0 - 1e-12)),
+        Err(PortOptError::TangencyUndefined(_))
+    ));
+    for bad in [0.5, f64::NAN] {
+        assert!(matches!(
+            po::tangency_weights_capped(&c.mu, &c.sig, RF, bad),
+            Err(PortOptError::InvalidInput(_))
+        ));
+    }
+    let w = po::tangency_weights_capped(&c.mu, &c.sig, r_gmv - 1e-3, 1e3).unwrap();
+    assert_eq!(
+        w,
+        po::tangency_weights_capped(&c.mu, &c.sig, r_gmv - 1e-3, f64::INFINITY).unwrap()
+    );
+    assert!(po::gross_leverage(&w).unwrap() > po::TANGENCY_MAX_LEVERAGE);
     assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-8);
     let l1: f64 = w.iter().map(|v| v.abs()).sum();
     assert!((po::gross_leverage(&w).unwrap() - l1).abs() < 1e-12);
@@ -982,4 +1002,194 @@ fn cholesky_reconstruction_grid() {
             assert!((ax[i] - 1.0).abs() < 1e-11);
         }
     }
+}
+
+// ------------------------------------------------------------ cost-aware QP
+
+fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).fold(0.0, |m, (x, y)| m.max((x - y).abs()))
+}
+
+const INF: f64 = f64::INFINITY;
+
+#[test]
+fn turnover_kappa_zero_matches_longonly_qp() {
+    let c = ctx();
+    let n = c.mu.len();
+    let mut e0 = vec![0.0; n];
+    e0[0] = 1.0;
+    let ramp: Vec<f64> = (0..n).map(|i| -0.2 + 0.1 * i as f64).collect();
+    for w0 in [vec![1.0 / n as f64; n], e0, ramp] {
+        for (lbv, ubv) in [(0.0, INF), (0.02, 0.40), (0.0, 0.25)] {
+            let lb = vec![lbv; n];
+            let ub = vec![ubv; n];
+            let r = po::min_variance_turnover_solve(
+                &c.sig,
+                &w0,
+                0.0,
+                Some(&lb),
+                Some(&ub),
+                INF,
+                po::QP_MAX_ITER,
+            )
+            .unwrap();
+            assert!(r.converged && r.kkt_residual < 1e-12);
+            let reference = po::min_variance_longonly(&c.sig, Some(&lb), Some(&ub)).unwrap();
+            assert!(max_abs_diff(&r.weights, &reference) < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn turnover_large_kappa_returns_feasible_w0() {
+    let c = ctx();
+    let n = c.mu.len();
+    let eq = vec![1.0 / n as f64; n];
+    let mut two = vec![0.0; n];
+    two[0] = 0.5;
+    two[5] = 0.5;
+    let lb = vec![0.02; n];
+    let ub = vec![0.40; n];
+    for (w0, lo, hi) in [
+        (&eq, None, None),
+        (&c.w_mkt, Some(lb.as_slice()), Some(ub.as_slice())),
+        (&two, None, None),
+    ] {
+        let r =
+            po::min_variance_turnover_solve(&c.sig, w0, 1.0, lo, hi, INF, po::QP_MAX_ITER).unwrap();
+        assert!(r.converged);
+        assert!(max_abs_diff(&r.weights, w0) < 1e-12);
+        assert!(r.turnover < 1e-12);
+        let mv = po::mean_variance_turnover(&c.mu, &c.sig, w0, 2.5, 10.0, lo, hi, INF).unwrap();
+        assert!(max_abs_diff(&mv, w0) < 1e-12);
+    }
+}
+
+#[test]
+fn turnover_monotone_decreasing_in_kappa() {
+    let c = ctx();
+    let n = c.mu.len();
+    let eq = vec![1.0 / n as f64; n];
+    let lb = vec![0.02; n];
+    let ub = vec![0.40; n];
+    let kappas = [0.0, 1e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 1e-1];
+    for variant in 0..2 {
+        let tos: Vec<f64> = kappas
+            .iter()
+            .map(|&k| {
+                let r = if variant == 0 {
+                    po::min_variance_turnover_solve(&c.sig, &eq, k, None, None, INF, 1000)
+                } else {
+                    po::mean_variance_turnover_solve(
+                        &c.mu,
+                        &c.sig,
+                        &c.w_mkt,
+                        2.5,
+                        k,
+                        Some(&lb),
+                        Some(&ub),
+                        INF,
+                        1000,
+                    )
+                }
+                .unwrap();
+                assert!(r.converged);
+                r.turnover
+            })
+            .collect();
+        for pair in tos.windows(2) {
+            assert!(pair[1] <= pair[0] + 1e-12, "{tos:?}");
+        }
+        assert!(tos[0] > 0.3 && tos[tos.len() - 1] < 1e-12);
+    }
+}
+
+#[test]
+fn turnover_cap_binds_and_is_certified() {
+    let c = ctx();
+    let n = c.mu.len();
+    let eq = vec![1.0 / n as f64; n];
+    let free = po::min_variance_turnover_solve(&c.sig, &eq, 1e-4, None, None, INF, 1000).unwrap();
+    for cap in [0.8, 0.5, 0.2, 0.05, 0.0] {
+        let r = po::min_variance_turnover_solve(&c.sig, &eq, 1e-4, None, None, cap, 1000).unwrap();
+        assert!(r.converged && r.kkt_residual < 1e-12, "cap {cap}");
+        assert!((r.turnover - cap.min(free.turnover)).abs() < 1e-12);
+    }
+    let loose = po::min_variance_turnover_solve(&c.sig, &eq, 1e-4, None, None, 5.0, 1000).unwrap();
+    assert!(max_abs_diff(&loose.weights, &free.weights) < 1e-12);
+    // w0 outside the box: smallest attainable turnover 0.3 + 0.1 + 0.4 = 0.8.
+    let mut bad = vec![0.0; n];
+    bad[0] = 0.6;
+    bad[1] = 0.4;
+    let ub = vec![0.3; n];
+    assert!(matches!(
+        po::min_variance_turnover_solve(&c.sig, &bad, 0.0, None, Some(&ub), 0.7, 1000),
+        Err(PortOptError::Infeasible(_))
+    ));
+    let r = po::min_variance_turnover_solve(&c.sig, &bad, 0.0, None, Some(&ub), 0.8, 1000).unwrap();
+    assert!(r.converged && (r.turnover - 0.8).abs() < 1e-12);
+}
+
+#[test]
+fn turnover_validation_trivial_cases_and_wrappers() {
+    let c = ctx();
+    let n = c.mu.len();
+    let eq = vec![1.0 / n as f64; n];
+    let solve = |w0: &[f64], k: f64, cap: f64| {
+        po::min_variance_turnover_solve(&c.sig, w0, k, None, None, cap, 1000)
+    };
+    assert!(matches!(
+        solve(&eq, -1e-3, INF),
+        Err(PortOptError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        solve(&eq, f64::NAN, INF),
+        Err(PortOptError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        solve(&eq[..3], 0.0, INF),
+        Err(PortOptError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        solve(&[f64::NAN; 8], 0.0, INF),
+        Err(PortOptError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        solve(&eq, 0.0, -0.1),
+        Err(PortOptError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        po::mean_variance_turnover_solve(&c.mu, &c.sig, &eq, 0.0, 1e-3, None, None, INF, 1000),
+        Err(PortOptError::InvalidInput(_))
+    ));
+    let one = po::min_variance_turnover_solve(
+        &Matrix::from_rows(&[vec![0.04]]).unwrap(),
+        &[0.3],
+        1e-3,
+        None,
+        None,
+        INF,
+        1000,
+    )
+    .unwrap();
+    assert!(one.converged && one.weights == vec![1.0] && (one.turnover - 0.7).abs() < 1e-15);
+    let lb = vec![0.02; n];
+    let ub = vec![0.4; n];
+    let a = po::mean_variance_turnover_solve(
+        &c.mu,
+        &c.sig,
+        &eq,
+        2.5,
+        1e-3,
+        Some(&lb),
+        Some(&ub),
+        INF,
+        1000,
+    )
+    .unwrap();
+    let b = po::mean_variance_turnover(&c.mu, &c.sig, &eq, 2.5, 1e-3, Some(&lb), Some(&ub), INF)
+        .unwrap();
+    assert_eq!(a.weights, b);
+    let capped = po::min_variance_turnover_solve(&c.sig, &eq, 1e-3, None, None, INF, 2).unwrap();
+    assert!(!capped.converged);
 }

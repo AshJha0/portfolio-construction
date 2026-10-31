@@ -153,6 +153,40 @@ def test_vol_target_scales_to_ex_ante_vol(returns):
     assert res.gross_returns[0] == pytest.approx(day0, abs=1e-15)
 
 
+def test_vol_estimator_default_and_custom(returns):
+    w = np.full(8, 0.125)
+    base = run_backtest_net(returns, const(w), vol_target=0.05, cost_bps=5)
+
+    def sample_annual(h: np.ndarray) -> np.ndarray:
+        return po.annualize_cov(po.sample_cov(h))
+
+    same = run_backtest_net(
+        returns, const(w), vol_target=0.05, cost_bps=5, vol_estimator=sample_annual
+    )
+    np.testing.assert_array_equal(base.scales, same.scales)
+    np.testing.assert_array_equal(base.net_returns, same.net_returns)
+
+    def doubled(h: np.ndarray) -> np.ndarray:
+        return 2.0 * sample_annual(h)
+
+    dbl = run_backtest_net(returns, const(w), vol_target=0.05, cost_bps=5, vol_estimator=doubled)
+    np.testing.assert_allclose(dbl.scales, base.scales / math.sqrt(2.0), rtol=1e-12)
+    # The estimator is only consulted when vol_target is set.
+    plain = run_backtest_net(returns, const(w), vol_estimator=doubled)
+    np.testing.assert_array_equal(plain.scales, np.ones_like(plain.scales))
+
+
+def test_vol_estimator_validation(returns):
+    w = np.full(8, 0.125)
+    with pytest.raises(ValueError, match="vol_estimator must be None or callable"):
+        run_backtest_net(returns, const(w), vol_target=0.05, vol_estimator=3.0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="finite 8 x 8 matrix"):
+        run_backtest_net(returns, const(w), vol_target=0.05, vol_estimator=lambda h: np.eye(3))
+    bad = np.full((8, 8), np.nan)
+    with pytest.raises(ValueError, match="finite 8 x 8 matrix"):
+        run_backtest_net(returns, const(w), vol_target=0.05, vol_estimator=lambda h: bad)
+
+
 def test_max_gross_caps_scaled_target(returns):
     w = np.zeros(8)
     w[0], w[1] = 2.0, -1.0

@@ -11,7 +11,7 @@ import pytest
 
 import portopt as po
 
-GOLDEN_CASE_COUNT = 23
+GOLDEN_CASE_COUNT = 26
 
 
 def _vec(expect: dict, prefix: str) -> np.ndarray:
@@ -110,6 +110,7 @@ def test_tangency_unconstrained(golden, ctx):
     sharpe = (ctx["mu"] @ w - rf) / np.sqrt(w @ ctx["sig"] @ w)
     assert sharpe == pytest.approx(c["expect"]["sharpe"], abs=c["tol"])
     assert po.gross_leverage(w) == pytest.approx(c["expect"]["gross_leverage"], abs=c["tol"])
+    assert c["expect"]["gross_leverage"] < po.TANGENCY_MAX_LEVERAGE  # the cap does not bind
 
 
 def test_frontier_point(golden, ctx):
@@ -280,3 +281,37 @@ def test_qp_goldens_are_input_stable(golden, ctx):
         step=63,
     )
     assert abs(res.avg_turnover - c["expect"]["avg_turnover"]) < 1e-12
+
+
+def _turnover_case_check(c: dict, res: po.TurnoverQpResult, sig: np.ndarray) -> None:
+    assert res.converged and res.kkt_residual < 1e-12
+    assert np.allclose(res.weights, _vec(c["expect"], "w"), atol=c["tol"])
+    got = {"turnover": res.turnover, "variance": float(res.weights @ sig @ res.weights)}
+    check({k: c["expect"][k] for k in ("turnover", "variance")}, got, c["tol"])
+
+
+def test_minvar_turnover_goldens(golden, ctx):
+    c = golden["minvar_turnover_l1"]
+    w0 = _vec(c["inputs"], "w0")
+    res = po.min_variance_turnover_solve(ctx["sig"], w0, c["inputs"]["kappa"])
+    _turnover_case_check(c, res, ctx["sig"])
+
+    c = golden["minvar_turnover_capped"]
+    w0 = _vec(c["inputs"], "w0")
+    res = po.min_variance_turnover_solve(
+        ctx["sig"], w0, c["inputs"]["kappa"], max_turnover=c["inputs"]["max_turnover"]
+    )
+    _turnover_case_check(c, res, ctx["sig"])
+    assert res.turnover == pytest.approx(c["inputs"]["max_turnover"], abs=1e-12)
+
+
+def test_meanvar_turnover_golden(golden, ctx):
+    c = golden["meanvar_turnover_box"]
+    inp = c["inputs"]
+    w0 = _vec(inp, "w0")
+    res = po.mean_variance_turnover_solve(
+        ctx["mu"], ctx["sig"], w0, inp["risk_aversion"], inp["kappa"], lb=inp["lb"], ub=inp["ub"]
+    )
+    _turnover_case_check(c, res, ctx["sig"])
+    caps = ctx["caps"]
+    assert np.allclose(w0, caps / caps.sum(), atol=1e-15)

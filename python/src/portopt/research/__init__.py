@@ -17,16 +17,46 @@ backtest deliberately leaves out:
   the Ledoit-Wolf (2008) paired test of a Sharpe difference.
 * :mod:`portopt.research.strategies`: weight functions for the
   construction rules compared in ``python/studies/cost_aware_allocation.py``.
+* :mod:`portopt.research.estimators`: EWMA covariance, Bayes-Stein and
+  James-Stein mean shrinkage, Ledoit-Wolf shrinkage toward the identity,
+  the Ledoit-Wolf (2020) analytical nonlinear shrinkage, and a PCA
+  statistical factor model.
+* :mod:`portopt.research.strategies_v2`: covariance-estimator objects and
+  weight rules built on them, including a volatility-targeting wrapper.
+* :mod:`portopt.research.data`: loaders for real daily returns from the
+  Kenneth French Data Library, fetched at run time and checked against
+  the SHA-256 vintages in ``data/real/manifest.json``; the holdout period
+  is refused unless a registered study asks for it.
+* :mod:`portopt.research.walkforward`: a trial registry
+  (``data/real/registry.json``) and walk-forward evaluation on top of
+  :func:`run_backtest_net`.
 
 Nothing in this layer can show that a strategy has an edge on the
 bundled data, because that data is synthetic (``data/generate_data.py``).
-What it can do is measure, net of costs and with honest error bars,
-whatever data it is given.
+On the real data it measures, net of costs and with error bars, what a
+construction rule did; it does not by itself show that the rule will
+keep doing it.
 """
 
 from __future__ import annotations
 
+from . import data, walkforward
 from .costs import NetBacktestResult, run_backtest_net
+from .estimators import (
+    FactorModelResult,
+    LinearShrinkageResult,
+    MeanShrinkageResult,
+    NonlinearShrinkageResult,
+    bayes_stein_mean,
+    ewma_constant_correlation,
+    ewma_covariance,
+    ewma_decay,
+    ewma_weights,
+    james_stein_mean,
+    ledoit_wolf_identity,
+    nonlinear_shrinkage,
+    pca_factor_covariance,
+)
 from .stats import (
     BootstrapResult,
     PairedSharpeTest,
@@ -52,6 +82,28 @@ from .strategies import (
     max_sharpe_longonly,
     min_variance_longonly,
     tangency_capped,
+)
+from .strategies_v2 import (
+    CovarianceEstimator,
+    VolTargetedWeights,
+    erc_with,
+    ewma_cc_estimator,
+    ewma_estimator,
+    lw_constant_corr_estimator,
+    lw_identity_estimator,
+    max_sharpe_bayes_stein,
+    min_variance_longonly_with,
+    nonlinear_estimator,
+    pca_estimator,
+    sample_estimator,
+    vol_target,
+)
+from .walkforward import (
+    WalkForwardResult,
+    n_trials,
+    register_study,
+    run_schedule_net,
+    walk_forward,
 )
 
 __all__ = [
@@ -79,4 +131,37 @@ __all__ = [
     "max_sharpe_longonly",
     "min_variance_longonly",
     "tangency_capped",
+    "FactorModelResult",
+    "LinearShrinkageResult",
+    "MeanShrinkageResult",
+    "NonlinearShrinkageResult",
+    "bayes_stein_mean",
+    "ewma_constant_correlation",
+    "ewma_covariance",
+    "ewma_decay",
+    "ewma_weights",
+    "james_stein_mean",
+    "ledoit_wolf_identity",
+    "nonlinear_shrinkage",
+    "pca_factor_covariance",
+    "CovarianceEstimator",
+    "VolTargetedWeights",
+    "erc_with",
+    "ewma_cc_estimator",
+    "ewma_estimator",
+    "lw_constant_corr_estimator",
+    "lw_identity_estimator",
+    "max_sharpe_bayes_stein",
+    "min_variance_longonly_with",
+    "nonlinear_estimator",
+    "pca_estimator",
+    "sample_estimator",
+    "vol_target",
+    "data",
+    "walkforward",
+    "WalkForwardResult",
+    "n_trials",
+    "register_study",
+    "run_schedule_net",
+    "walk_forward",
 ]

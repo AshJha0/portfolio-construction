@@ -115,7 +115,7 @@ fn input_f64(case: &GoldenCase, key: &str) -> f64 {
 #[test]
 fn golden_all_cases() {
     let g = golden();
-    assert_eq!(g.len(), 23, "expected 23 golden cases");
+    assert_eq!(g.len(), 26, "expected 26 golden cases");
     let c = ctx();
     let mut covered = 0usize;
 
@@ -416,7 +416,79 @@ fn golden_all_cases() {
         covered += 1;
     }
 
-    assert_eq!(covered, 23, "every golden case must be asserted");
+    // ------------------------------------------------------ cost-aware QP cases
+    let input_vec = |case: &GoldenCase, prefix: &str| -> Vec<f64> {
+        (0..c.mu.len())
+            .map(|i| input_f64(case, &format!("{prefix}_{i}")))
+            .collect()
+    };
+    let check_turnover = |case: &GoldenCase, r: &po::TurnoverQpResult| {
+        assert!(r.converged && r.kkt_residual < 1e-12, "{}", case.name);
+        check_vec(case, "w", &r.weights);
+        check(case, "turnover", r.turnover);
+        check(case, "variance", dot(&r.weights, &c.sig.matvec(&r.weights)));
+    };
+    {
+        let case = &g["minvar_turnover_l1"];
+        let w0 = input_vec(case, "w0");
+        let r = po::min_variance_turnover_solve(
+            &c.sig,
+            &w0,
+            input_f64(case, "kappa"),
+            None,
+            None,
+            f64::INFINITY,
+            po::QP_MAX_ITER,
+        )
+        .unwrap();
+        check_turnover(case, &r);
+        covered += 1;
+    }
+    {
+        let case = &g["minvar_turnover_capped"];
+        let w0 = input_vec(case, "w0");
+        let cap = input_f64(case, "max_turnover");
+        let r = po::min_variance_turnover_solve(
+            &c.sig,
+            &w0,
+            input_f64(case, "kappa"),
+            None,
+            None,
+            cap,
+            po::QP_MAX_ITER,
+        )
+        .unwrap();
+        check_turnover(case, &r);
+        assert!((r.turnover - cap).abs() < 1e-12);
+        covered += 1;
+    }
+    {
+        let case = &g["meanvar_turnover_box"];
+        let w0 = input_vec(case, "w0");
+        let cap_sum: f64 = c.caps.iter().sum();
+        for (a, b) in w0.iter().zip(&c.caps) {
+            assert!((a - b / cap_sum).abs() < 1e-15, "w0 = market weights");
+        }
+        let n = c.mu.len();
+        let lb = vec![input_f64(case, "lb"); n];
+        let ub = vec![input_f64(case, "ub"); n];
+        let r = po::mean_variance_turnover_solve(
+            &c.mu,
+            &c.sig,
+            &w0,
+            input_f64(case, "risk_aversion"),
+            input_f64(case, "kappa"),
+            Some(&lb),
+            Some(&ub),
+            f64::INFINITY,
+            po::QP_MAX_ITER,
+        )
+        .unwrap();
+        check_turnover(case, &r);
+        covered += 1;
+    }
+
+    assert_eq!(covered, 26, "every golden case must be asserted");
 }
 
 #[test]

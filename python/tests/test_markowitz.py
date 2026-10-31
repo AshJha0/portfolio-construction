@@ -199,23 +199,49 @@ def test_tangency_rf_too_high_rejected(moments):
 
 
 def test_tangency_near_gmv_rejected(moments):
-    """rf within 1e-6 (relative) of the GMV return A/C makes A - rf*C cancel
-    catastrophically (gross leverage 1e6..1e11); the guard rejects it with a
-    dedicated error, while rf = A/C - 1e-3 is fine (MAJ-1)."""
+    """Gross leverage scales like 1 / (A/C - rf); the guard rejects any
+    tangency whose gross leverage exceeds max_leverage (default 10), which
+    covers rf within rounding of A/C (leverage 1e6+) and rf merely close to
+    it (the 94x case of the round-2 review), while rf = 0.02 on the full
+    sample (4.14x) and rf = A/C - 0.1 pass."""
     mu, sig = moments["mu"], moments["sigma"]
     sc = po.two_fund_scalars(mu, sig)
     r_gmv = sc.a / sc.c
-    for eps in (1e-13, 1e-9):
+    for gap in (1e-13, 1e-9, 1e-3):
         with pytest.raises(po.TangencyUndefinedError, match="ill-conditioned"):
-            po.tangency_weights(mu, sig, r_gmv - eps)
-    w = po.tangency_weights(mu, sig, r_gmv - 1e-3)
+            po.tangency_weights(mu, sig, r_gmv - gap)
+    w = po.tangency_weights(mu, sig, 0.02)
+    assert 1.0 <= po.gross_leverage(w) <= po.TANGENCY_MAX_LEVERAGE
+    # The cap is a parameter: the 1e-3 gap passes when the caller allows it.
+    w = po.tangency_weights(mu, sig, r_gmv - 1e-3, max_leverage=1e3)
     assert w.sum() == pytest.approx(1.0, abs=1e-8)
     lev = po.gross_leverage(w)
-    assert np.isfinite(lev) and lev == pytest.approx(np.sum(np.abs(w)), abs=1e-12)
+    assert po.TANGENCY_MAX_LEVERAGE < lev <= 1e3
+    assert lev == pytest.approx(np.sum(np.abs(w)), abs=1e-12)
+    w_inf = po.tangency_weights(mu, sig, r_gmv - 1e-3, max_leverage=np.inf)
+    assert np.array_equal(w, w_inf)
+    # Exactly at the cap passes, just below it raises.
+    lev_02 = po.gross_leverage(po.tangency_weights(mu, sig, 0.02))
+    po.tangency_weights(mu, sig, 0.02, max_leverage=lev_02)
+    with pytest.raises(po.TangencyUndefinedError):
+        po.tangency_weights(mu, sig, 0.02, max_leverage=lev_02 * (1.0 - 1e-12))
+    for bad in (0.5, np.nan):
+        with pytest.raises(ValueError, match="max_leverage"):
+            po.tangency_weights(mu, sig, 0.02, max_leverage=bad)
     assert po.gross_leverage(np.array([0.2, 0.3, 0.5])) == pytest.approx(1.0, abs=1e-15)
     assert po.gross_leverage(np.array([1.5, -0.5])) == pytest.approx(2.0, abs=1e-15)
     with pytest.raises(ValueError):
         po.gross_leverage(np.array([np.nan]))
+
+
+def test_tangency_leverage_is_scale_invariant(moments):
+    """Leverage is dimensionless: scaling Sigma and the excess returns by
+    the same positive factor (e.g. daily vs annual units) leaves the weights
+    and therefore the guard decision unchanged."""
+    mu, sig = moments["mu"], moments["sigma"]
+    w_ann = po.tangency_weights(mu, sig, 0.02)
+    w_day = po.tangency_weights(mu / 252.0, sig / 252.0, 0.02 / 252.0)
+    assert np.allclose(w_ann, w_day, atol=1e-12)
 
 
 def test_n1_trivial_weights():
@@ -523,3 +549,274 @@ def test_qp_with_active_bounds_still_certified(moments):
         assert np.any(res.weights == lo) or np.any(res.weights == hi)
     fr = po.constrained_frontier_solve(mu, sig, 0.07, lb=0.0, ub=0.5)
     assert fr.converged and fr.kkt_residual < 1e-9
+
+
+# ------------------------------------------------------------ cost-aware QP
+
+
+def _turnover_objective(sig, c, w0, kappa, w):
+    return 0.5 * w @ sig @ w - c @ w + kappa * np.abs(w - w0).sum()
+
+
+def _reference_turnover_objective(sig, c, w0, kappa, lb, ub, cap):
+    """Objective of a feasible scipy point for the split problem
+    (w, b, s), w - b + s = w0, b, s >= 0.  SLSQP first, trust-constr as
+    the fallback (same reasoning as _reference_objective)."""
+    from scipy.optimize import Bounds, LinearConstraint
+
+    n = sig.shape[0]
+    lo = np.broadcast_to(np.asarray(lb, dtype=float), (n,))
+    hi = np.broadcast_to(np.asarray(ub, dtype=float), (n,))
+
+    def split_obj(z):
+        return 0.5 * z[:n] @ sig @ z[:n] - c @ z[:n] + kappa * z[n:].sum()
+
+    def split_jac(z):
+        return np.concatenate([sig @ z[:n] - c, np.full(2 * n, kappa)])
+
+    def feasible(w):
+        ok = abs(w.sum() - 1.0) <= 1e-9 and np.all(w >= lo - 1e-9) and np.all(w <= hi + 1e-9)
+        return ok and (cap is None or np.abs(w - w0).sum() <= cap + 1e-9)
+
+    x0 = np.clip(w0, lo, hi)
+    x0 = po.project_simplex_box(x0, 1.0, lo, hi)
+    d = x0 - w0
+    z0 = np.concatenate([x0, np.maximum(d, 0.0), np.maximum(-d, 0.0)])
+    cons = [
+        {"type": "eq", "fun": lambda z: z[:n].sum() - 1.0},
+        {"type": "eq", "fun": lambda z: z[:n] - z[n : 2 * n] + z[2 * n :] - w0},
+    ]
+    if cap is not None:
+        cons.append({"type": "ineq", "fun": lambda z: cap - z[n:].sum()})
+    bounds = [(lo[i], None if hi[i] == np.inf else hi[i]) for i in range(n)]
+    bounds += [(0.0, None)] * (2 * n)
+    res = minimize(
+        split_obj,
+        z0,
+        jac=split_jac,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=cons,
+        options={"ftol": 1e-15, "maxiter": 2000},
+    )
+    candidates = [res.x[:n]] if res.success and feasible(res.x[:n]) else []
+    if not candidates:
+        rows = np.zeros((n + 1, 3 * n))
+        rows[0, :n] = 1.0
+        for i in range(n):
+            rows[1 + i, i], rows[1 + i, n + i], rows[1 + i, 2 * n + i] = 1.0, -1.0, 1.0
+        rhs = np.concatenate([[1.0], w0])
+        lin = [LinearConstraint(rows, rhs, rhs)]
+        if cap is not None:
+            row = np.concatenate([np.zeros(n), np.ones(2 * n)])
+            lin.append(LinearConstraint(row[None, :], -np.inf, cap))
+        hess = np.zeros((3 * n, 3 * n))
+        hess[:n, :n] = sig
+        tc = minimize(
+            split_obj,
+            z0,
+            jac=split_jac,
+            hess=lambda z: hess,
+            method="trust-constr",
+            bounds=Bounds(
+                np.concatenate([lo, np.zeros(2 * n)]),
+                np.concatenate([hi, np.full(2 * n, np.inf)]),
+            ),
+            constraints=lin,
+            options={"gtol": 1e-14, "xtol": 1e-15, "maxiter": 20000},
+        )
+        if feasible(tc.x[:n]):
+            candidates.append(tc.x[:n])
+    assert candidates, "no scipy reference point was feasible"
+    return min(_turnover_objective(sig, c, w0, kappa, w) for w in candidates)
+
+
+def test_turnover_kappa_zero_matches_longonly_qp(moments):
+    sig = moments["sigma"]
+    n = sig.shape[0]
+    for w0 in (np.full(n, 1.0 / n), np.eye(n)[0], np.linspace(-0.2, 0.5, n)):
+        for lb, ub in ((0.0, np.inf), (0.02, 0.40), (0.0, 0.25)):
+            res = po.min_variance_turnover_solve(sig, w0, 0.0, lb=lb, ub=ub)
+            assert res.converged and res.kkt_residual < 1e-12
+            ref = po.min_variance_longonly(sig, lb=lb, ub=ub)
+            assert np.max(np.abs(res.weights - ref)) < 1e-12
+            assert res.turnover == pytest.approx(np.abs(ref - w0).sum(), abs=1e-12)
+
+
+def test_turnover_large_kappa_returns_feasible_w0(moments):
+    sig = moments["sigma"]
+    n = sig.shape[0]
+    caps = np.array([30.0, 20.0, 8.0, 6.0, 7.0, 25.0, 15.0, 10.0])
+    for w0, lb, ub in (
+        (np.full(n, 1.0 / n), 0.0, np.inf),
+        (caps / caps.sum(), 0.02, 0.40),
+        (np.array([0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0]), 0.0, np.inf),
+    ):
+        res = po.min_variance_turnover_solve(sig, w0, 1.0, lb=lb, ub=ub)
+        assert res.converged
+        assert np.max(np.abs(res.weights - w0)) < 1e-12
+        assert res.turnover < 1e-12
+        mv = po.mean_variance_turnover_solve(moments["mu"], sig, w0, 2.5, 10.0, lb=lb, ub=ub)
+        assert mv.converged and np.max(np.abs(mv.weights - w0)) < 1e-12
+
+
+def test_turnover_decreases_monotonically_in_kappa(moments):
+    """(k2 - k1)(TO(k2) - TO(k1)) <= 0 follows from comparing the two
+    optimality conditions; the objective net of costs rises with kappa."""
+    mu, sig = moments["mu"], moments["sigma"]
+    n = sig.shape[0]
+    caps = np.array([30.0, 20.0, 8.0, 6.0, 7.0, 25.0, 15.0, 10.0])
+    kappas = [0.0, 1e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 1e-1]
+    for solve in (
+        lambda k: po.min_variance_turnover_solve(sig, np.full(n, 1.0 / n), k),
+        lambda k: po.mean_variance_turnover_solve(
+            mu, sig, caps / caps.sum(), 2.5, k, lb=0.02, ub=0.40
+        ),
+    ):
+        tos = []
+        for k in kappas:
+            res = solve(k)
+            assert res.converged
+            tos.append(res.turnover)
+        assert all(b <= a + 1e-12 for a, b in zip(tos, tos[1:], strict=False)), tos
+        assert tos[0] > 0.3 and tos[-1] < 1e-12
+
+
+def test_turnover_cap_binds_and_is_certified(moments):
+    sig = moments["sigma"]
+    n = sig.shape[0]
+    w0 = np.full(n, 1.0 / n)
+    free = po.min_variance_turnover_solve(sig, w0, 1e-4)
+    for cap in (0.8, 0.5, 0.2, 0.05, 0.0):
+        res = po.min_variance_turnover_solve(sig, w0, 1e-4, max_turnover=cap)
+        assert res.converged and res.kkt_residual < 1e-12
+        assert res.turnover <= cap + 1e-12
+        assert res.turnover == pytest.approx(min(cap, free.turnover), abs=1e-12)
+    # A slack cap changes nothing.
+    loose = po.min_variance_turnover_solve(sig, w0, 1e-4, max_turnover=5.0)
+    assert np.max(np.abs(loose.weights - free.weights)) < 1e-12
+    # Cap below the smallest attainable turnover: w0 outside the box.
+    w_bad = np.array([0.6, 0.4, 0, 0, 0, 0, 0, 0.0])
+    with pytest.raises(ValueError, match="infeasible turnover cap"):
+        po.min_variance_turnover_solve(sig, w_bad, 0.0, ub=0.3, max_turnover=0.7)
+    # Smallest attainable: |0.6-0.3| + |0.4-0.3| + budget gap 0.4 = 0.8.
+    res = po.min_variance_turnover_solve(sig, w_bad, 0.0, ub=0.3, max_turnover=0.8)
+    assert res.converged and res.turnover == pytest.approx(0.8, abs=1e-12)
+
+
+def test_turnover_matches_scipy_on_random_problems():
+    rng = np.random.default_rng(31)
+    for trial in range(15):
+        n = int(rng.integers(2, 9))
+        a = rng.standard_normal((n, n))
+        sig = a @ a.T / n + 1e-3 * np.eye(n)
+        mu = rng.normal(0.05, 0.04, n)
+        w0 = rng.dirichlet(np.ones(n))
+        kappa = float(10.0 ** rng.uniform(-4, -1))
+        ub = float(rng.uniform(1.0 / n + 0.05, 1.0))
+        wc = np.clip(w0, 0.0, ub)
+        to_min = np.abs(wc - w0).sum() + abs(1.0 - wc.sum())
+        cap = to_min + float(rng.uniform(0.02, 0.4)) if trial % 3 == 0 else None
+        for c, res in (
+            (np.zeros(n), po.min_variance_turnover_solve(sig, w0, kappa, ub=ub, max_turnover=cap)),
+            (
+                mu / 2.0,
+                po.mean_variance_turnover_solve(mu, sig, w0, 2.0, kappa, ub=ub, max_turnover=cap),
+            ),
+        ):
+            assert res.converged, (trial, res.kkt_residual)
+            f_qp = _turnover_objective(sig, c, w0, kappa, res.weights)
+            f_ref = _reference_turnover_objective(sig, c, w0, kappa, 0.0, ub, cap)
+            assert f_qp <= f_ref + 1e-12
+
+
+def test_turnover_certificate_rejects_wrong_points(moments):
+    """The certificate is the KKT system of the nonsmooth problem: the
+    optimum passes, a perturbed point fails stationarity, a wrong budget
+    multiplier fails, and a negative cap multiplier fails."""
+    from portopt.markowitz import _turnover_certificate
+
+    sig = moments["sigma"]
+    n = sig.shape[0]
+    w0 = np.full(n, 1.0 / n)
+    kappa = 1e-3
+    res = po.min_variance_turnover_solve(sig, w0, kappa)
+    lo, hi, c = np.zeros(n), np.full(n, np.inf), np.zeros(n)
+    w = res.weights
+    # Recover nu from a free (not at bound, not at w0) coordinate.
+    free = [i for i in range(n) if w[i] > 1e-9 and abs(w[i] - w0[i]) > 1e-9]
+    i = free[0]
+    nu = float((sig @ w)[i] + kappa * np.sign(w[i] - w0[i]))
+    ok, resid = _turnover_certificate(sig, c, w0, kappa, lo, hi, np.inf, nu, 0.0, w)
+    assert ok and resid < 1e-12
+    ok, _ = _turnover_certificate(sig, c, w0, kappa, lo, hi, np.inf, nu * 1.01, 0.0, w)
+    assert not ok
+    w_pert = w.copy()
+    w_pert[free[0]] += 1e-4
+    w_pert[free[1]] -= 1e-4
+    ok, _ = _turnover_certificate(sig, c, w0, kappa, lo, hi, np.inf, nu, 0.0, w_pert)
+    assert not ok
+    ok, _ = _turnover_certificate(sig, c, w0, kappa, lo, hi, 10.0, nu, -1e-3, w)
+    assert not ok
+    # tau > 0 with a slack cap breaks complementarity.
+    ok, _ = _turnover_certificate(sig, c, w0, kappa, lo, hi, 10.0, nu, 1e-3, w)
+    assert not ok
+    # The wrapper agrees with the solve variant.
+    assert np.array_equal(po.min_variance_turnover(sig, w0, kappa), w)
+
+
+def test_turnover_validation_and_trivial_cases(moments):
+    mu, sig = moments["mu"], moments["sigma"]
+    n = sig.shape[0]
+    w0 = np.full(n, 1.0 / n)
+    with pytest.raises(ValueError, match="kappa"):
+        po.min_variance_turnover_solve(sig, w0, -1e-3)
+    with pytest.raises(ValueError, match="kappa"):
+        po.min_variance_turnover_solve(sig, w0, np.nan)
+    with pytest.raises(ValueError, match="w0 length"):
+        po.min_variance_turnover_solve(sig, w0[:3], 0.0)
+    with pytest.raises(ValueError, match="w0 contains"):
+        po.min_variance_turnover_solve(sig, np.full(n, np.nan), 0.0)
+    with pytest.raises(ValueError, match="max_turnover"):
+        po.min_variance_turnover_solve(sig, w0, 0.0, max_turnover=-0.1)
+    with pytest.raises(ValueError, match="risk_aversion"):
+        po.mean_variance_turnover_solve(mu, sig, w0, 0.0, 1e-3)
+    with pytest.raises(ValueError, match="infeasible bounds"):
+        po.min_variance_turnover_solve(sig, w0, 0.0, ub=0.1)
+    with pytest.raises(ValueError, match="not positive definite"):
+        dup = sig.copy()
+        dup[1, :], dup[:, 1] = dup[0, :], dup[:, 0]
+        po.min_variance_turnover_solve(dup, w0, 0.0)
+    one = po.min_variance_turnover_solve(np.array([[0.04]]), np.array([0.3]), 1e-3)
+    assert one.converged and one.weights.tolist() == [1.0] and one.turnover == pytest.approx(0.7)
+    # Deterministic and frozen.
+    a = po.mean_variance_turnover_solve(mu, sig, w0, 2.5, 1e-3, lb=0.02, ub=0.4)
+    b = po.mean_variance_turnover_solve(mu, sig, w0, 2.5, 1e-3, lb=0.02, ub=0.4)
+    assert np.array_equal(a.weights, b.weights) and a.iterations == b.iterations
+    with pytest.raises(AttributeError):
+        a.converged = False  # type: ignore[misc]
+    assert np.array_equal(
+        po.mean_variance_turnover(mu, sig, w0, 2.5, 1e-3, lb=0.02, ub=0.4), a.weights
+    )
+
+
+def test_turnover_wrapper_raises_when_not_certified(moments):
+    sig = moments["sigma"]
+    n = sig.shape[0]
+    res = po.min_variance_turnover_solve(sig, np.full(n, 1.0 / n), 1e-3, max_iter=2)
+    assert not res.converged
+    with pytest.raises(ValueError, match="not certified"):
+        po.min_variance_turnover(sig, np.full(n, 1.0 / n), 1e-3, max_iter=2)
+
+
+def test_turnover_meanvar_kappa_zero_is_box_mean_variance(moments):
+    """kappa = 0: the optimum is the box-constrained mean-variance
+    portfolio, independent of w0; check it against scipy."""
+    mu, sig = moments["mu"], moments["sigma"]
+    n = sig.shape[0]
+    a = po.mean_variance_turnover_solve(mu, sig, np.full(n, 1.0 / n), 2.5, 0.0, lb=0.02, ub=0.4)
+    b = po.mean_variance_turnover_solve(mu, sig, np.eye(n)[3], 2.5, 0.0, lb=0.02, ub=0.4)
+    assert a.converged and b.converged
+    assert np.max(np.abs(a.weights - b.weights)) < 1e-12
+    f_ref = _reference_turnover_objective(sig, mu / 2.5, np.full(n, 1.0 / n), 0.0, 0.02, 0.4, None)
+    assert _turnover_objective(sig, mu / 2.5, np.full(n, 1.0 / n), 0.0, a.weights) <= f_ref + 1e-12

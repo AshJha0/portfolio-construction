@@ -137,8 +137,9 @@ Python names; the ports use the same names in each language's casing
 | Moments | `sample_mean`, `sample_cov`, `annualize_mean`, `annualize_cov` | mean divides by T, covariance by T-1; correctly rounded sums; annualise by `periods` (default 252) |
 | Shrinkage | `shrink_covariance` | Ledoit-Wolf (2004) constant-correlation target, intensity per Appendix B and the authors' `covCor.m` |
 | Linear algebra | `cholesky`, `chol_solve`, `spd_solve`, `spd_inverse` | Cholesky-Banachiewicz, relative pivot gate 1e-13; every inverse is two triangular solves |
-| Closed-form Markowitz | `two_fund_scalars`, `min_variance_weights`, `tangency_weights`, `frontier_weights`, `efficient_frontier`, `gross_leverage` | A, B, C, D scalars; 25-point grid; `TangencyUndefinedError` when rf is at or above A/C, or within a relative 1e-6 of it |
+| Closed-form Markowitz | `two_fund_scalars`, `min_variance_weights`, `tangency_weights`, `frontier_weights`, `efficient_frontier`, `gross_leverage` | A, B, C, D scalars; 25-point grid; `TangencyUndefinedError` when rf is at or above A/C, or when the tangency's gross leverage exceeds `max_leverage` (default 10) |
 | Constrained Markowitz | `project_simplex_box`, `attainable_return_range`, `min_variance_longonly[_solve]`, `constrained_frontier[_solve, _weights]` | sort-based box-simplex projection; Goldfarb-Idnani dual active-set QP with a KKT residual; the `_solve` forms return `QpResult`, the weights-only forms raise if not certified |
+| Cost-aware Markowitz | `min_variance_turnover[_solve]`, `mean_variance_turnover[_solve]` | `kappa * sum|w - w0|` turnover penalty and optional turnover cap over the box-simplex; buy/sell split solved exactly by the same dual active-set QP; KKT certificate of the nonsmooth problem; `_solve` forms return `TurnoverQpResult` with the turnover |
 | Black-Litterman | `implied_equilibrium_returns`, `views_to_matrices`, `default_omega`, `bl_posterior`, `bl_weights` | reverse optimisation; absolute and relative views; He-Litterman Omega scaled by per-view confidence; one k-by-k Cholesky solve |
 | Risk parity | `risk_contributions`, `erc_weights`, `risk_budget_solve`, `risk_budget_weights`, `inverse_vol_weights` | cyclical coordinate descent on Spinu's log-barrier form, tol 1e-10, at most 10,000 sweeps |
 | Backtest | `rebalance_indices`, `run_backtest`, `annualized_return`, `annualized_vol`, `sharpe_ratio`, `max_drawdown` | expanding window 500 rows, re-estimate every 63 rows, L1 turnover between target vectors |
@@ -183,15 +184,31 @@ w ERC            0.0579   0.0568   0.0620   0.0617   0.0444   0.4037   0.1756   
 RC ERC           0.1250   0.1250   0.1250   0.1250   0.1250   0.1250   0.1250   0.1250
 RC spread: ERC 1.30e-12, inv-vol 1.20e-01
 
+=== Cost-aware rebalancing: long-only min variance from market weights
+objective 1/2 w'Sw + kappa*sum|w - w0|, w0 = market weights, kappa in variance units
+     kappa  turnover      vol  certified
+  0.000000    1.2430   0.0404        yes
+  0.000030    1.1319   0.0404        yes
+  0.000100    1.0379   0.0405        yes
+  0.000300    0.9877   0.0407        yes
+  0.001000    0.8253   0.0432        yes
+kappa 0 with turnover cap 0.25: turnover 0.2500, vol 0.0719
+                  US_EQ    EU_EQ    JP_EQ    UK_EQ    EM_EQ  US_BOND  IG_CORP FX_CARRY
+w market         0.2479   0.1653   0.0661   0.0496   0.0579   0.2066   0.1240   0.0826
+w kappa 1e-4     0.0285   0.0000   0.0168   0.0226   0.0000   0.6463   0.1240   0.1619
+w cap 0.25       0.1943   0.1518   0.0661   0.0496   0.0000   0.3316   0.1240   0.0826
+
 === Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)
 method          ann ret  ann vol   sharpe   max DD  avg turno
 equal_weight     0.0614   0.0930   0.4454   0.1868     0.0000
 min_var_lo       0.0479   0.0402   0.6948   0.0589     0.0273
-tangency         0.4835   0.5749   0.8062   0.4700    18.1968
+min_var_tc       0.0479   0.0403   0.6930   0.0586     0.0102
+tangency         0.0493   0.0397   0.7382   0.0523     0.0372
 black_litt       0.0701   0.1070   0.4687   0.2331     0.0174
 erc              0.0528   0.0516   0.6365   0.1019     0.0051
 inverse_vol      0.0564   0.0630   0.5783   0.1235     0.0043
-note: tangency undefined/ill-conditioned at 8 rebalance date(s) (rf at or above the min-var return); fell back to min-variance there.
+note: tangency fell back to min-variance at 12 rebalance date(s): 8 with rf at or above the min-var return A/C, 4 above the 10x gross-leverage cap.
+min_var_tc = min_var_lo with turnover penalty kappa = 3e-5 against the previous target.
 ```
 
 ### What the backtest section measures

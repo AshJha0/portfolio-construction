@@ -197,8 +197,9 @@ Vector greedy_extreme(const Vector& mu, const Vector& lo, const Vector& hi, doub
   return w;
 }
 
-/// Constraint kinds of the dual active-set QP.
-enum class Kind { kEquality, kLower, kUpper, kFixed };
+/// Constraint kinds of the dual active-set QP (kInequality = a general
+/// row a'x >= b, placed after the bounds).
+enum class Kind { kEquality, kLower, kUpper, kFixed, kInequality };
 
 struct Constraint {
   Kind kind;
@@ -207,14 +208,26 @@ struct Constraint {
   Vector normal;
 };
 
-/// Goldfarb-Idnani dual active-set method for min 1/2 w'Sw s.t.
-/// a_eq w = b_eq, lo <= w <= hi (API_SPEC 3.6). Constraints are
-/// n_c'w >= b_c: the equalities (rows of a_eq, then every fixed coordinate
-/// lo_i == hi_i; added first, multipliers unrestricted), then the lower
-/// bounds and the finite upper bounds of the non-fixed coordinates.
-QpResult dual_active_set_qp(const Matrix& s, const std::vector<Vector>& a_eq,
-                            const Vector& b_eq, const Vector& lo, const Vector& hi,
-                            int max_iter) {
+/// Final state of the dual active-set loop.
+struct GiState {
+  Vector w;
+  std::vector<std::size_t> active;
+  Vector u;
+  int iterations;
+  std::vector<Constraint> cons;
+  std::size_t meq;
+  Matrix low;
+};
+
+/// Goldfarb-Idnani loop for min 1/2 x'Sx - lin'x s.t. a_eq x = b_eq,
+/// a_in x >= b_in, lo <= x <= hi (API_SPEC 3.6, 3.7). An empty `lin`
+/// means no linear term (start at x = 0); otherwise the loop starts at the
+/// unconstrained minimizer S^-1 lin and is unchanged (the step directions
+/// do not depend on lin). Constraint order: equality rows, fixed
+/// coordinates, lower bounds, finite upper bounds, inequality rows.
+GiState gi_loop(const Matrix& s, const Vector& lin, const std::vector<Vector>& a_eq,
+                const Vector& b_eq, const std::vector<Vector>& a_in, const Vector& b_in,
+                const Vector& lo, const Vector& hi, int max_iter) {
   const std::size_t n = s.rows();
   const Matrix low = cholesky(s);
   std::vector<Constraint> cons;
@@ -243,9 +256,12 @@ QpResult dual_active_set_qp(const Matrix& s, const std::vector<Vector>& a_eq,
       cons.push_back(Constraint{Kind::kUpper, i, -hi[i], e});
     }
   }
+  for (std::size_t j = 0; j < a_in.size(); ++j) {
+    cons.push_back(Constraint{Kind::kInequality, j, b_in[j], a_in[j]});
+  }
   const std::size_t n_cons = cons.size();
 
-  Vector w(n, 0.0);
+  Vector w = lin.empty() ? Vector(n, 0.0) : chol_solve(low, lin);
   std::vector<std::size_t> active;
   Vector u;
   std::vector<bool> skipped(n_cons, false);
@@ -347,6 +363,27 @@ QpResult dual_active_set_qp(const Matrix& s, const std::vector<Vector>& a_eq,
       u.erase(u.begin() + j_block);
     }
   }
+  return GiState{w, active, u, iterations, cons, meq, low};
+}
+
+/// Goldfarb-Idnani dual active-set method for min 1/2 w'Sw s.t.
+/// a_eq w = b_eq, lo <= w <= hi (API_SPEC 3.6). Constraints are
+/// n_c'w >= b_c: the equalities (rows of a_eq, then every fixed coordinate
+/// lo_i == hi_i; added first, multipliers unrestricted), then the lower
+/// bounds and the finite upper bounds of the non-fixed coordinates.
+QpResult dual_active_set_qp(const Matrix& s, const std::vector<Vector>& a_eq,
+                            const Vector& b_eq, const Vector& lo, const Vector& hi,
+                            int max_iter) {
+  const std::size_t n = s.rows();
+  GiState st = gi_loop(s, Vector(), a_eq, b_eq, {}, Vector(), lo, hi, max_iter);
+  const Matrix& low = st.low;
+  const std::vector<Constraint>& cons = st.cons;
+  const std::size_t meq = st.meq;
+  const std::size_t n_cons = cons.size();
+  Vector w = st.w;
+  const std::vector<std::size_t>& active = st.active;
+  Vector u = st.u;
+  const int iterations = st.iterations;
   // Polish: minimizer on the final active set in closed form,
   // w = S^-1 N u with (N' S^-1 N) u = b_active, plus one step of iterative
   // refinement on the equality residual.
@@ -475,7 +512,336 @@ QpResult frontier_point(const Vector& mu, const Matrix& sigma, double tgt, const
   return dual_active_set_qp(sigma, {Vector(n, 1.0), mu}, Vector{1.0, tgt}, lo, hi, max_iter);
 }
 
+Vector require_turnover_converged(const TurnoverQpResult& res, const char* what) {
+  if (!res.converged) {
+    std::ostringstream msg;
+    msg << what << ": cost-aware QP not certified after " << res.iterations
+        << " iterations (KKT residual " << res.kkt_residual
+        << "); the input is degenerate, use the *_solve variant to inspect the iterate";
+    throw std::domain_error(msg.str());
+  }
+  return res.weights;
+}
+
+double abs_diff_sum(const Vector& w, const Vector& w0) {
+  Vector a(w.size(), 0.0);
+  for (std::size_t i = 0; i < w.size(); ++i) a[i] = std::fabs(w[i] - w0[i]);
+  return kahan_sum(a);
+}
+
+/// Pinned cost-aware QP (API_SPEC 3.7); inputs already validated.
+TurnoverQpResult turnover_qp(const Matrix& s, const Vector& c, const Vector& w0, double kappa,
+                             const Vector& lo, const Vector& hi, double cap, int max_iter) {
+  const std::size_t n = s.rows();
+  if (n == 1) return TurnoverQpResult{Vector{1.0}, 0, true, 0.0, std::fabs(1.0 - w0[0])};
+  const Matrix low = cholesky(s);
+  // eps = 0.5 / trace(S^-1) <= lambda_min(S) / 2 keeps S - eps I SPD; the
+  // split problem is exactly equivalent for any 0 < eps < lambda_min(S).
+  double tr = 0.0;
+  for (std::size_t j = 0; j < n; ++j) {
+    Vector e(n, 0.0);
+    e[j] = 1.0;
+    tr += chol_solve(low, e)[j];
+  }
+  const double eps = 0.5 / tr;
+  const std::size_t m = 3 * n;
+  Matrix h(m, m, 0.0);
+  for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t j = 0; j < n; ++j) h(i, j) = s(i, j);
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    h(i, i) = s(i, i) - eps;
+    h(n + i, n + i) = eps;
+    h(2 * n + i, 2 * n + i) = eps;
+  }
+  Vector lin(m, 0.0);
+  for (std::size_t i = 0; i < n; ++i) {
+    lin[i] = c[i] - eps * w0[i];
+    lin[n + i] = -kappa;
+    lin[2 * n + i] = -kappa;
+  }
+  std::vector<Vector> a_eq(n + 1, Vector(m, 0.0));
+  Vector b_eq(n + 1, 0.0);
+  for (std::size_t i = 0; i < n; ++i) a_eq[0][i] = 1.0;
+  b_eq[0] = 1.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    a_eq[1 + i][i] = 1.0;
+    a_eq[1 + i][n + i] = -1.0;
+    a_eq[1 + i][2 * n + i] = 1.0;
+    b_eq[1 + i] = w0[i];
+  }
+  Vector lo3(m, 0.0);
+  Vector hi3(m, kInf);
+  for (std::size_t i = 0; i < n; ++i) {
+    lo3[i] = lo[i];
+    hi3[i] = hi[i];
+  }
+  std::vector<Vector> a_in;
+  Vector b_in;
+  if (std::isfinite(cap)) {
+    Vector row(m, 0.0);
+    for (std::size_t k = n; k < m; ++k) row[k] = -1.0;
+    a_in.push_back(row);
+    b_in.push_back(-cap);
+  }
+  const GiState st = gi_loop(h, lin, a_eq, b_eq, a_in, b_in, lo3, hi3, max_iter);
+
+  // States from the active set (fixed at a bound, held at w0, or free on
+  // the buy / sell side).
+  std::vector<bool> at_lo(n, false);
+  std::vector<bool> at_hi(n, false);
+  std::vector<bool> b_act(n, false);
+  std::vector<bool> s_act(n, false);
+  bool cap_act = false;
+  for (std::size_t i = 0; i < n; ++i) at_lo[i] = lo[i] == hi[i];
+  for (std::size_t cidx : st.active) {
+    const Constraint& con = st.cons[cidx];
+    if (con.kind == Kind::kInequality) {
+      cap_act = true;
+    } else if (con.kind == Kind::kUpper) {
+      at_hi[con.idx] = true;
+    } else if (con.kind == Kind::kLower || con.kind == Kind::kFixed) {
+      if (con.idx < n) {
+        at_lo[con.idx] = true;
+      } else if (con.idx < 2 * n) {
+        b_act[con.idx - n] = true;
+      } else {
+        s_act[con.idx - 2 * n] = true;
+      }
+    }
+  }
+  std::vector<bool> is_fixed(n, false);
+  Vector fix_val(n, 0.0);
+  Vector sgn(n, 0.0);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (at_lo[i]) {
+      is_fixed[i] = true;
+      fix_val[i] = lo[i];
+    } else if (at_hi[i]) {
+      is_fixed[i] = true;
+      fix_val[i] = hi[i];
+    } else if (b_act[i] && s_act[i]) {
+      is_fixed[i] = true;
+      fix_val[i] = w0[i];
+    } else if (s_act[i]) {
+      sgn[i] = 1.0;
+    } else if (b_act[i]) {
+      sgn[i] = -1.0;
+    } else {
+      sgn[i] = (st.w[n + i] - st.w[2 * n + i] >= 0.0) ? 1.0 : -1.0;
+    }
+  }
+
+  // Exact polish in w alone on the face {sum w = 1, [cap row], w_i = fix_i}.
+  std::vector<Vector> normals{Vector(n, 1.0)};
+  Vector rhs{1.0};
+  if (cap_act) {
+    double b_cap = -cap;
+    Vector row(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+      row[i] = -sgn[i];
+      if (is_fixed[i]) {
+        b_cap += std::fabs(fix_val[i] - w0[i]);
+      } else {
+        b_cap -= sgn[i] * w0[i];
+      }
+    }
+    normals.push_back(row);
+    rhs.push_back(b_cap);
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    if (is_fixed[i]) {
+      Vector e(n, 0.0);
+      e[i] = 1.0;
+      normals.push_back(e);
+      rhs.push_back(fix_val[i]);
+    }
+  }
+  Vector c_eff(n, 0.0);
+  for (std::size_t i = 0; i < n; ++i) c_eff[i] = c[i] - kappa * sgn[i];
+  const Vector x0 = chol_solve(low, c_eff);
+  const std::size_t q = normals.size();
+  std::vector<Vector> ys(q);
+  for (std::size_t i = 0; i < q; ++i) ys[i] = chol_solve(low, normals[i]);
+  Matrix gram(q, q, 0.0);
+  for (std::size_t i = 0; i < q; ++i) {
+    for (std::size_t j = i; j < q; ++j) {
+      gram(i, j) = dot(normals[i], ys[j]);
+      gram(j, i) = gram(i, j);
+    }
+  }
+  Matrix low_g;
+  try {
+    low_g = cholesky(gram);
+  } catch (const std::exception&) {
+    // Dependent face rows: the loop iterate is returned uncertified.
+    Vector w_bad(n, 0.0);
+    for (std::size_t k = 0; k < n; ++k) w_bad[k] = clip(st.w[k], lo[k], hi[k]);
+    return TurnoverQpResult{w_bad, st.iterations, false, kInf, abs_diff_sum(w_bad, w0)};
+  }
+  Vector rb(q, 0.0);
+  for (std::size_t i = 0; i < q; ++i) rb[i] = rhs[i] - dot(normals[i], x0);
+  const Vector u_arr = chol_solve(low_g, rb);
+  Vector w(x0);
+  for (std::size_t i = 0; i < q; ++i) {
+    for (std::size_t k = 0; k < n; ++k) w[k] += u_arr[i] * ys[i][k];
+  }
+  Vector resid(q, 0.0);
+  for (std::size_t i = 0; i < q; ++i) resid[i] = rhs[i] - dot(normals[i], w);
+  const Vector du = chol_solve(low_g, resid);
+  for (std::size_t i = 0; i < q; ++i) {
+    for (std::size_t k = 0; k < n; ++k) w[k] += du[i] * ys[i][k];
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    if (is_fixed[i]) w[i] = fix_val[i];
+  }
+  const double nu = u_arr[0] + du[0];
+  const double tau = cap_act ? u_arr[1] + du[1] : 0.0;
+  const detail::KktCertificate cert =
+      detail::turnover_certificate(s, c, w0, kappa, lo, hi, cap, nu, tau, w);
+  for (std::size_t k = 0; k < n; ++k) w[k] = clip(w[k], lo[k], hi[k]);
+  const double turnover = abs_diff_sum(w, w0);
+  return TurnoverQpResult{w, st.iterations, cert.certified, cert.residual, turnover};
+}
+
+/// Shared validation of the cost-aware entry points (API_SPEC 3.7).
+void turnover_setup(const Matrix& sigma, const Vector& w0, double kappa, const Vector& lb,
+                    const Vector& ub, double max_turnover, int max_iter, Vector& lo,
+                    Vector& hi) {
+  qp_setup(sigma, lb, ub, max_iter, lo, hi);
+  const std::size_t n = sigma.rows();
+  if (w0.size() != n) {
+    std::ostringstream msg;
+    msg << "w0 length " << w0.size() << " does not match sigma dimension " << n;
+    throw std::invalid_argument(msg.str());
+  }
+  for (double v : w0) {
+    if (!std::isfinite(v)) throw std::invalid_argument("w0 contains NaN or infinite entries");
+  }
+  if (!std::isfinite(kappa) || kappa < 0.0) {
+    std::ostringstream msg;
+    msg << "kappa must be finite and >= 0 (got " << kappa << ")";
+    throw std::invalid_argument(msg.str());
+  }
+  if (std::isnan(max_turnover) || max_turnover < 0.0) {
+    std::ostringstream msg;
+    msg << "max_turnover must be >= 0 (got " << max_turnover << ")";
+    throw std::invalid_argument(msg.str());
+  }
+  if (std::isfinite(max_turnover)) {
+    // Smallest attainable turnover: clip w0 into the box, then move the
+    // budget gap |1 - sum(clip)|; no feasible portfolio does better.
+    Vector wc(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) wc[i] = clip(w0[i], lo[i], hi[i]);
+    const double to_min = abs_diff_sum(wc, w0) + std::fabs(1.0 - kahan_sum(wc));
+    if (max_turnover < to_min - 1e-12 * (1.0 + to_min)) {
+      std::ostringstream msg;
+      msg << "infeasible turnover cap: max_turnover = " << max_turnover
+          << " is below the smallest attainable turnover " << to_min;
+      throw std::invalid_argument(msg.str());
+    }
+  }
+}
+
 }  // namespace
+
+namespace detail {
+
+KktCertificate turnover_certificate(const Matrix& s, const Vector& c, const Vector& w0,
+                                    double kappa, const Vector& lo, const Vector& hi,
+                                    double cap, double nu, double tau, const Vector& w) {
+  const std::size_t n = w.size();
+  const double k = kappa + tau;
+  double rhs_scale = 1.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    rhs_scale = std::max({rhs_scale, std::fabs(w0[i]), std::fabs(lo[i])});
+    if (std::isfinite(hi[i])) rhs_scale = std::max(rhs_scale, std::fabs(hi[i]));
+  }
+  if (std::isfinite(cap)) rhs_scale = std::max(rhs_scale, cap);
+  const double turnover = abs_diff_sum(w, w0);
+  double feas = std::fabs(kahan_sum(w) - 1.0);
+  for (std::size_t i = 0; i < n; ++i) feas = std::max({feas, lo[i] - w[i], w[i] - hi[i]});
+  if (std::isfinite(cap)) feas = std::max(feas, turnover - cap);
+  const Vector sw = mat_vec(s, w);
+  double sw_max = 0.0;
+  double c_max = 0.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    sw_max = std::max(sw_max, std::fabs(sw[i]));
+    c_max = std::max(c_max, std::fabs(c[i]));
+  }
+  const double stat_scale = std::fabs(nu) + k + sw_max + c_max;
+  const double stat_tol = kQpConvTol * (1.0 + stat_scale);
+  double dual = std::max(0.0, -tau);
+  if (tau > stat_tol && std::isfinite(cap)) {
+    feas = std::max(feas, cap - turnover);  // complementarity
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const double d = w[i] - w0[i];
+    const bool at_lo = w[i] <= lo[i] + kQpConvTol * (1.0 + std::fabs(lo[i]));
+    const bool at_hi =
+        std::isfinite(hi[i]) && w[i] >= hi[i] - kQpConvTol * (1.0 + std::fabs(hi[i]));
+    const bool at_w0 = std::fabs(d) <= kQpConvTol * (1.0 + std::fabs(w0[i]));
+    const double xi = -(sw[i] - c[i] - nu);
+    if (!at_lo) {
+      const double s_left = (at_w0 || d < 0.0) ? -k : k;
+      dual = std::max(dual, s_left - xi);
+    }
+    if (!at_hi) {
+      const double s_right = (at_w0 || d > 0.0) ? k : -k;
+      dual = std::max(dual, xi - s_right);
+    }
+  }
+  const bool certified = feas <= kQpConvTol * (1.0 + rhs_scale) && dual <= stat_tol;
+  return KktCertificate{certified, std::max(feas, dual)};
+}
+
+}  // namespace detail
+
+TurnoverQpResult min_variance_turnover_solve(const Matrix& sigma, const Vector& w0,
+                                             double kappa, const Vector& lb, const Vector& ub,
+                                             double max_turnover, int max_iter) {
+  Vector lo;
+  Vector hi;
+  turnover_setup(sigma, w0, kappa, lb, ub, max_turnover, max_iter, lo, hi);
+  return turnover_qp(sigma, Vector(sigma.rows(), 0.0), w0, kappa, lo, hi, max_turnover,
+                     max_iter);
+}
+
+Vector min_variance_turnover(const Matrix& sigma, const Vector& w0, double kappa,
+                             const Vector& lb, const Vector& ub, double max_turnover,
+                             int max_iter) {
+  return require_turnover_converged(
+      min_variance_turnover_solve(sigma, w0, kappa, lb, ub, max_turnover, max_iter),
+      "min_variance_turnover");
+}
+
+TurnoverQpResult mean_variance_turnover_solve(const Vector& mu, const Matrix& sigma,
+                                              const Vector& w0, double risk_aversion,
+                                              double kappa, const Vector& lb,
+                                              const Vector& ub, double max_turnover,
+                                              int max_iter) {
+  validate_mu_sigma(mu, sigma);
+  if (!std::isfinite(risk_aversion) || risk_aversion <= 0.0) {
+    std::ostringstream msg;
+    msg << "risk_aversion must be finite and > 0 (got " << risk_aversion << ")";
+    throw std::invalid_argument(msg.str());
+  }
+  Vector lo;
+  Vector hi;
+  turnover_setup(sigma, w0, kappa, lb, ub, max_turnover, max_iter, lo, hi);
+  Vector c(mu.size(), 0.0);
+  for (std::size_t i = 0; i < mu.size(); ++i) c[i] = mu[i] / risk_aversion;
+  return turnover_qp(sigma, c, w0, kappa, lo, hi, max_turnover, max_iter);
+}
+
+Vector mean_variance_turnover(const Vector& mu, const Matrix& sigma, const Vector& w0,
+                              double risk_aversion, double kappa, const Vector& lb,
+                              const Vector& ub, double max_turnover, int max_iter) {
+  return require_turnover_converged(
+      mean_variance_turnover_solve(mu, sigma, w0, risk_aversion, kappa, lb, ub, max_turnover,
+                                   max_iter),
+      "mean_variance_turnover");
+}
 
 TwoFundScalars two_fund_scalars(const Vector& mu, const Matrix& sigma) {
   validate_mu_sigma(mu, sigma);
@@ -506,9 +872,15 @@ Vector min_variance_weights(const Matrix& sigma) {
   return w;
 }
 
-Vector tangency_weights(const Vector& mu, const Matrix& sigma, double rf) {
+Vector tangency_weights(const Vector& mu, const Matrix& sigma, double rf,
+                        double max_leverage) {
   validate_mu_sigma(mu, sigma);
   if (!std::isfinite(rf)) throw std::invalid_argument("rf must be finite");
+  if (std::isnan(max_leverage) || max_leverage < 1.0) {
+    std::ostringstream msg;
+    msg << "max_leverage must be >= 1 (got " << max_leverage << ")";
+    throw std::invalid_argument(msg.str());
+  }
   if (sigma.rows() == 1) {
     validate_1x1(sigma);
     if (mu[0] <= rf) {
@@ -527,20 +899,16 @@ Vector tangency_weights(const Vector& mu, const Matrix& sigma, double rf) {
         "tangency undefined: A - rf*C <= 0 (risk-free rate is at or above the "
         "minimum-variance portfolio return)");
   }
-  // Conditioning guard: A - rf*C is a difference of two O(A) numbers.
-  const double a = vec_sum(chol_solve(low, mu));
-  const double c = vec_sum(chol_solve(low, Vector(mu.size(), 1.0)));
-  const double scale = std::max(std::fabs(a), std::fabs(rf) * c);
-  if (denom <= kTangencyCondRtol * scale) {
-    std::ostringstream msg;
-    msg << "tangency ill-conditioned: A - rf*C = " << denom << " is within a relative "
-        << kTangencyCondRtol << " of cancelling (rf within " << kTangencyCondRtol
-        << " of the minimum-variance return " << a / c
-        << "); weights would carry gross leverage of order 1e6 or more";
-    throw TangencyUndefinedError(msg.str());
-  }
   Vector w(z);
   for (double& v : w) v /= denom;
+  const double lev = gross_leverage(w);
+  if (lev > max_leverage) {
+    std::ostringstream msg;
+    msg << "tangency ill-conditioned: gross leverage " << lev << " exceeds max_leverage "
+        << max_leverage << " (A - rf*C = " << denom
+        << "; rf is too close below the minimum-variance return A/C)";
+    throw TangencyUndefinedError(msg.str());
+  }
   return w;
 }
 

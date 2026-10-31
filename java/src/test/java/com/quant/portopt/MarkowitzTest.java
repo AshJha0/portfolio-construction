@@ -404,16 +404,30 @@ public class MarkowitzTest {
 
     @Test
     public void tangencyNearGmvRejected() {
-        // MAJ-1: rf within 1e-6 (relative) of A/C cancels A - rf*C catastrophically.
+        // Gross leverage scales like 1 / (A/C - rf): the guard rejects any tangency
+        // above maxLeverage (default 10), from rf within rounding of A/C up to merely
+        // close to it; rf = 0.02 on the full sample (4.14x) passes.
         double[] mu = TestData.muAnnualized();
         double[][] sig = TestData.sigmaAnnualized();
         Markowitz.TwoFundScalars sc = Markowitz.twoFundScalars(mu, sig);
         double rGmv = sc.a() / sc.c();
+        for (double gap : new double[] {1e-13, 1e-9, 1e-3}) {
+            assertThrows(Markowitz.TangencyUndefinedException.class,
+                    () -> Markowitz.tangencyWeights(mu, sig, rGmv - gap));
+        }
+        double lev02 = Markowitz.grossLeverage(Markowitz.tangencyWeights(mu, sig, 0.02));
+        assertTrue(lev02 >= 1.0 && lev02 <= Markowitz.TANGENCY_MAX_LEVERAGE);
+        Markowitz.tangencyWeights(mu, sig, 0.02, lev02); // exactly at the cap passes
         assertThrows(Markowitz.TangencyUndefinedException.class,
-                () -> Markowitz.tangencyWeights(mu, sig, rGmv - 1e-13));
-        assertThrows(Markowitz.TangencyUndefinedException.class,
-                () -> Markowitz.tangencyWeights(mu, sig, rGmv - 1e-9));
-        double[] w = Markowitz.tangencyWeights(mu, sig, rGmv - 1e-3);
+                () -> Markowitz.tangencyWeights(mu, sig, 0.02, lev02 * (1.0 - 1e-12)));
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.tangencyWeights(mu, sig, 0.02, 0.5));
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.tangencyWeights(mu, sig, 0.02, Double.NaN));
+        double[] w = Markowitz.tangencyWeights(mu, sig, rGmv - 1e-3, 1e3);
+        assertArrayEquals(w, Markowitz.tangencyWeights(mu, sig, rGmv - 1e-3,
+                Double.POSITIVE_INFINITY), 0.0);
+        assertTrue(Markowitz.grossLeverage(w) > Markowitz.TANGENCY_MAX_LEVERAGE);
         assertEquals(1.0, Linalg.sum(w), 1e-8);
         double l1 = 0.0;
         for (double v : w) {
@@ -507,5 +521,200 @@ public class MarkowitzTest {
                 new double[] {0.0}, new double[] {0.5}, Markowitz.QP_MAX_ITER);
         assertTrue(fr.converged());
         assertTrue(fr.kktResidual() < 1e-9);
+    }
+
+    // ---------------------------------------------------------- cost-aware QP
+
+    private static final double INF = Double.POSITIVE_INFINITY;
+
+    private static double maxAbsDiff(double[] a, double[] b) {
+        double m = 0.0;
+        for (int i = 0; i < a.length; i++) {
+            m = Math.max(m, Math.abs(a[i] - b[i]));
+        }
+        return m;
+    }
+
+    private static double[] filled(int n, double v) {
+        double[] out = new double[n];
+        java.util.Arrays.fill(out, v);
+        return out;
+    }
+
+    @Test
+    public void turnoverKappaZeroMatchesLongOnlyQp() {
+        double[][] sig = TestData.sigmaAnnualized();
+        int n = sig.length;
+        double[] e0 = new double[n];
+        e0[0] = 1.0;
+        double[] ramp = new double[n];
+        for (int i = 0; i < n; i++) {
+            ramp[i] = -0.2 + 0.1 * i;
+        }
+        double[][] bounds = {{0.0, INF}, {0.02, 0.40}, {0.0, 0.25}};
+        for (double[] w0 : new double[][] {filled(n, 1.0 / n), e0, ramp}) {
+            for (double[] b : bounds) {
+                double[] lb = {b[0]};
+                double[] ub = {b[1]};
+                Markowitz.TurnoverQpResult r = Markowitz.minVarianceTurnoverSolve(sig, w0, 0.0,
+                        lb, ub, INF, Markowitz.QP_MAX_ITER);
+                assertTrue(r.converged() && r.kktResidual() < 1e-12);
+                double[] ref = Markowitz.minVarianceLongOnly(sig, lb, ub);
+                assertTrue(maxAbsDiff(r.weights(), ref) < 1e-12);
+            }
+        }
+    }
+
+    @Test
+    public void turnoverLargeKappaReturnsFeasibleW0() {
+        double[][] sig = TestData.sigmaAnnualized();
+        int n = sig.length;
+        double[] eq = filled(n, 1.0 / n);
+        double[] two = new double[n];
+        two[0] = 0.5;
+        two[5] = 0.5;
+        double[] wm = TestData.wMkt();
+        Markowitz.TurnoverQpResult a = Markowitz.minVarianceTurnoverSolve(sig, eq, 1.0, null,
+                null, INF, Markowitz.QP_MAX_ITER);
+        assertTrue(a.converged() && maxAbsDiff(a.weights(), eq) < 1e-12 && a.turnover() < 1e-12);
+        Markowitz.TurnoverQpResult b = Markowitz.minVarianceTurnoverSolve(sig, wm, 1.0,
+                new double[] {0.02}, new double[] {0.40}, INF, Markowitz.QP_MAX_ITER);
+        assertTrue(b.converged() && maxAbsDiff(b.weights(), wm) < 1e-12);
+        Markowitz.TurnoverQpResult c = Markowitz.minVarianceTurnoverSolve(sig, two, 1.0, null,
+                null, INF, Markowitz.QP_MAX_ITER);
+        assertTrue(c.converged() && maxAbsDiff(c.weights(), two) < 1e-12);
+        double[] d = Markowitz.meanVarianceTurnover(TestData.muAnnualized(), sig, wm, 2.5, 10.0,
+                null, null, INF);
+        assertTrue(maxAbsDiff(d, wm) < 1e-12);
+    }
+
+    @Test
+    public void turnoverMonotoneDecreasingInKappa() {
+        double[][] sig = TestData.sigmaAnnualized();
+        int n = sig.length;
+        double[] eq = filled(n, 1.0 / n);
+        double[] kappas = {0.0, 1e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 1e-1};
+        for (int variant = 0; variant < 2; variant++) {
+            double prev = INF;
+            double first = 0.0;
+            for (double k : kappas) {
+                Markowitz.TurnoverQpResult r = variant == 0
+                        ? Markowitz.minVarianceTurnoverSolve(sig, eq, k, null, null, INF, 1000)
+                        : Markowitz.meanVarianceTurnoverSolve(TestData.muAnnualized(), sig,
+                                TestData.wMkt(), 2.5, k, new double[] {0.02},
+                                new double[] {0.40}, INF, 1000);
+                assertTrue(r.converged());
+                assertTrue("kappa " + k, r.turnover() <= prev + 1e-12);
+                if (k == 0.0) {
+                    first = r.turnover();
+                }
+                prev = r.turnover();
+            }
+            assertTrue(first > 0.3 && prev < 1e-12);
+        }
+    }
+
+    @Test
+    public void turnoverCapBindsAndIsCertified() {
+        double[][] sig = TestData.sigmaAnnualized();
+        int n = sig.length;
+        double[] eq = filled(n, 1.0 / n);
+        Markowitz.TurnoverQpResult free = Markowitz.minVarianceTurnoverSolve(sig, eq, 1e-4,
+                null, null, INF, 1000);
+        for (double cap : new double[] {0.8, 0.5, 0.2, 0.05, 0.0}) {
+            Markowitz.TurnoverQpResult r = Markowitz.minVarianceTurnoverSolve(sig, eq, 1e-4,
+                    null, null, cap, 1000);
+            assertTrue("cap " + cap, r.converged() && r.kktResidual() < 1e-12);
+            assertEquals(Math.min(cap, free.turnover()), r.turnover(), 1e-12);
+        }
+        Markowitz.TurnoverQpResult loose = Markowitz.minVarianceTurnoverSolve(sig, eq, 1e-4,
+                null, null, 5.0, 1000);
+        assertTrue(maxAbsDiff(loose.weights(), free.weights()) < 1e-12);
+        // w0 outside the box: smallest attainable turnover 0.3 + 0.1 + 0.4 = 0.8.
+        double[] bad = new double[n];
+        bad[0] = 0.6;
+        bad[1] = 0.4;
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.minVarianceTurnoverSolve(
+                sig, bad, 0.0, null, new double[] {0.3}, 0.7, 1000));
+        Markowitz.TurnoverQpResult r = Markowitz.minVarianceTurnoverSolve(sig, bad, 0.0, null,
+                new double[] {0.3}, 0.8, 1000);
+        assertTrue(r.converged());
+        assertEquals(0.8, r.turnover(), 1e-12);
+    }
+
+    @Test
+    public void turnoverCertificateRejectsWrongPoints() {
+        double[][] sig = TestData.sigmaAnnualized();
+        int n = sig.length;
+        double[] eq = filled(n, 1.0 / n);
+        double kappa = 1e-3;
+        Markowitz.TurnoverQpResult r = Markowitz.minVarianceTurnoverSolve(sig, eq, kappa, null,
+                null, INF, 1000);
+        double[] w = r.weights();
+        double[] lo = new double[n];
+        double[] hi = filled(n, INF);
+        double[] c = new double[n];
+        java.util.List<Integer> free = new java.util.ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            if (w[i] > 1e-9 && Math.abs(w[i] - eq[i]) > 1e-9) {
+                free.add(i);
+            }
+        }
+        assertTrue(free.size() >= 2);
+        int i0 = free.get(0);
+        double nu = Linalg.matVec(sig, w)[i0] + kappa * Math.signum(w[i0] - eq[i0]);
+        Markowitz.KktCertificate cert =
+                Markowitz.turnoverCertificate(sig, c, eq, kappa, lo, hi, INF, nu, 0.0, w);
+        assertTrue(cert.certified() && cert.residual() < 1e-12);
+        assertTrue(!Markowitz.turnoverCertificate(sig, c, eq, kappa, lo, hi, INF, nu * 1.01, 0.0,
+                w).certified());
+        double[] wp = w.clone();
+        wp[free.get(0)] += 1e-4;
+        wp[free.get(1)] -= 1e-4;
+        assertTrue(!Markowitz.turnoverCertificate(sig, c, eq, kappa, lo, hi, INF, nu, 0.0, wp)
+                .certified());
+        assertTrue(!Markowitz.turnoverCertificate(sig, c, eq, kappa, lo, hi, 10.0, nu, -1e-3, w)
+                .certified());
+        assertTrue(!Markowitz.turnoverCertificate(sig, c, eq, kappa, lo, hi, 10.0, nu, 1e-3, w)
+                .certified());
+        assertArrayEquals(w, Markowitz.minVarianceTurnover(sig, eq, kappa), 0.0);
+    }
+
+    @Test
+    public void turnoverValidationTrivialCasesAndWrappers() {
+        double[][] sig = TestData.sigmaAnnualized();
+        double[] mu = TestData.muAnnualized();
+        int n = sig.length;
+        double[] eq = filled(n, 1.0 / n);
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.minVarianceTurnoverSolve(sig, eq, -1e-3, null, null, INF, 1000));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.minVarianceTurnoverSolve(
+                sig, eq, Double.NaN, null, null, INF, 1000));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.minVarianceTurnoverSolve(
+                sig, new double[] {0.5, 0.5}, 0.0, null, null, INF, 1000));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.minVarianceTurnoverSolve(
+                sig, filled(n, Double.NaN), 0.0, null, null, INF, 1000));
+        assertThrows(IllegalArgumentException.class,
+                () -> Markowitz.minVarianceTurnoverSolve(sig, eq, 0.0, null, null, -0.1, 1000));
+        assertThrows(IllegalArgumentException.class, () -> Markowitz.meanVarianceTurnoverSolve(
+                mu, sig, eq, 0.0, 1e-3, null, null, INF, 1000));
+        Markowitz.TurnoverQpResult one = Markowitz.minVarianceTurnoverSolve(
+                new double[][] {{0.04}}, new double[] {0.3}, 1e-3, null, null, INF, 1000);
+        assertTrue(one.converged());
+        assertArrayEquals(new double[] {1.0}, one.weights(), 0.0);
+        assertEquals(0.7, one.turnover(), 1e-15);
+        double[] lb = {0.02};
+        double[] ub = {0.4};
+        Markowitz.TurnoverQpResult a = Markowitz.meanVarianceTurnoverSolve(mu, sig, eq, 2.5,
+                1e-3, lb, ub, INF, 1000);
+        Markowitz.TurnoverQpResult b = Markowitz.meanVarianceTurnoverSolve(mu, sig, eq, 2.5,
+                1e-3, lb, ub, INF, 1000);
+        assertArrayEquals(a.weights(), b.weights(), 0.0);
+        assertEquals(a.iterations(), b.iterations());
+        assertArrayEquals(a.weights(),
+                Markowitz.meanVarianceTurnover(mu, sig, eq, 2.5, 1e-3, lb, ub, INF), 0.0);
+        Markowitz.TurnoverQpResult capped = Markowitz.minVarianceTurnoverSolve(sig, eq, 1e-3,
+                null, null, INF, 2);
+        assertTrue(!capped.converged());
     }
 }

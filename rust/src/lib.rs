@@ -47,9 +47,11 @@ pub use linalg::{
 pub use markowitz::{
     attainable_return_range, constrained_frontier, constrained_frontier_solve,
     constrained_frontier_weights, efficient_frontier, frontier_weights, gross_leverage,
-    min_variance_longonly, min_variance_longonly_solve, min_variance_weights, project_simplex_box,
-    tangency_weights, two_fund_scalars, FrontierSweep, QpResult, TwoFundScalars, QP_MAX_ITER,
-    TANGENCY_COND_RTOL,
+    mean_variance_turnover, mean_variance_turnover_solve, min_variance_longonly,
+    min_variance_longonly_solve, min_variance_turnover, min_variance_turnover_solve,
+    min_variance_weights, project_simplex_box, tangency_weights, tangency_weights_capped,
+    two_fund_scalars, FrontierSweep, QpResult, TurnoverQpResult, TwoFundScalars, QP_MAX_ITER,
+    TANGENCY_MAX_LEVERAGE,
 };
 pub use risk_parity::{
     erc_weights, erc_weights_with, inverse_vol_weights, risk_budget_solve, risk_budget_weights,

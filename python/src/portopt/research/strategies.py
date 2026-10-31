@@ -233,7 +233,9 @@ def tangency_capped(
         sig = _cov(h, shrink)
         gmv = min_variance_weights(sig)
         try:
-            w = tangency_weights(mu, sig, rfv)
+            # This rule applies its own leverage cap below, so the core default cap
+            # (TANGENCY_MAX_LEVERAGE) is switched off here.
+            w = tangency_weights(mu, sig, rfv, max_leverage=math.inf)
         except TangencyUndefinedError:
             log.append(h.shape[0])
             w = gmv

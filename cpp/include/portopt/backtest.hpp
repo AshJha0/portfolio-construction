@@ -26,6 +26,7 @@
 /// the compensated kahan_sum (matches the reference's math.fsum).
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <vector>
 
@@ -74,11 +75,51 @@ struct BacktestResult {
   double avg_turnover;  ///< Mean of turnovers (0 when fewer than 2 rebalances).
 };
 
+/// Non-owning, read-only view of the leading rows [0, rows()) of a returns
+/// matrix: the expanding history handed to a view weight function without
+/// copying it. The view is valid only for the duration of the weight_fn
+/// call (it points into the matrix passed to run_backtest); do not keep it.
+class HistoryView {
+ public:
+  /// View of rows [0, rows) of \p returns.
+  /// \throws std::invalid_argument if rows > returns.rows().
+  HistoryView(const Matrix& returns, std::size_t rows);
+
+  std::size_t rows() const noexcept { return rows_; }
+  std::size_t cols() const noexcept { return src_->cols(); }
+
+  /// Element (i, j); i < rows() and j < cols() are the caller's contract
+  /// (unchecked, like Matrix::operator()).
+  double operator()(std::size_t i, std::size_t j) const { return (*src_)(i, j); }
+
+  /// Owning copy of the viewed rows, for code that needs a Matrix (for
+  /// example the estimators). Explicit on purpose: there is no implicit
+  /// conversion, so the two run_backtest overloads never compete for a
+  /// lambda whose parameter type is spelled out.
+  Matrix to_matrix() const;
+
+ private:
+  const Matrix* src_;
+  std::size_t rows_;
+};
+
 /// Quarterly expanding-window backtest with the pinned schedule.
-/// weight_fn(history) receives a copy of the expanding daily-return history
-/// (rows [0, t_k)) and must return finite weights of length n summing to 1
-/// within 1e-6 (validated; error otherwise). Requires T >= window + 2 (two
-/// holdout days, so that the ddof=1 volatility exists) and a finite rf.
+/// weight_fn(history) receives the expanding daily-return history (rows
+/// [0, t_k)) as a non-owning HistoryView (no copy) and must return finite
+/// weights of length n summing to 1 within 1e-6 (validated; error
+/// otherwise). Requires T >= window + 2 (two holdout days, so that the
+/// ddof=1 volatility exists) and a finite rf.
+BacktestResult run_backtest(const Matrix& returns,
+                            const std::function<Vector(const HistoryView&)>& weight_fn,
+                            double rf = 0.0, int window = kDefaultWindow,
+                            int step = kDefaultStep);
+
+/// Source-compatible overload for weight functions that take a Matrix:
+/// identical results, but each rebalance materialises the history rows
+/// [0, t_k) as an owning Matrix (one O(t_k n) copy per rebalance, as
+/// before the view overload existed), because the estimators take
+/// const Matrix&. Pass a lambda with an explicit parameter type: a generic
+/// `[](const auto& h)` lambda matches both overloads and is ambiguous.
 BacktestResult run_backtest(const Matrix& returns,
                             const std::function<Vector(const Matrix&)>& weight_fn,
                             double rf = 0.0, int window = kDefaultWindow,

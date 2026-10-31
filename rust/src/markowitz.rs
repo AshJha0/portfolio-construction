@@ -22,6 +22,11 @@
 //! Cholesky (API_SPEC.md section 3.6). The result is the KKT point of the
 //! QP up to rounding, so all ports agree to ~1e-13 and `converged` is a
 //! statement about the KKT conditions, not about an iterate step size.
+//!
+//! Cost-aware problems `min 1/2 w'Sw - c'w + kappa sum|w - w0|` over the
+//! same box-simplex, optionally with a turnover cap, run the same dual
+//! active-set method on an exactly equivalent strictly convex split
+//! problem in `(w, b, s)` (API_SPEC.md section 3.7).
 
 use crate::error::{PortOptError, Result};
 use crate::linalg::{chol_solve, cholesky, dot, kahan_sum, Matrix};
@@ -39,8 +44,9 @@ pub const QP_FEAS_TOL: f64 = 1.0e-13;
 pub const QP_DEGENERATE_TOL: f64 = 1.0e-9;
 /// Pinned KKT certificate tolerance (relative) for `converged`.
 pub const QP_CONV_TOL: f64 = 1.0e-9;
-/// Pinned relative conditioning threshold for the tangency denominator.
-pub const TANGENCY_COND_RTOL: f64 = 1.0e-6;
+/// Pinned default cap on the gross leverage `sum_i |w_i|` of the
+/// unconstrained tangency portfolio (API_SPEC 3.3).
+pub const TANGENCY_MAX_LEVERAGE: f64 = 10.0;
 
 fn validate_mu_sigma(mu: &[f64], sigma: &Matrix) -> Result<()> {
     if sigma.nrows() != sigma.ncols() {
@@ -132,21 +138,41 @@ pub fn min_variance_weights(sigma: &Matrix) -> Result<Vec<f64>> {
     Ok(y.iter().map(|v| v / c).collect())
 }
 
-/// Tangency (max-Sharpe) weights `Sigma^-1 (mu - rf 1) / (A - rf C)`.
+/// Tangency (max-Sharpe) weights `Sigma^-1 (mu - rf 1) / (A - rf C)` with
+/// the default gross-leverage cap [`TANGENCY_MAX_LEVERAGE`]; see
+/// [`tangency_weights_capped`].
 ///
 /// # Errors
-/// [`PortOptError::TangencyUndefined`] if
-/// `A - rf*C <= TANGENCY_COND_RTOL * max(|A|, |rf|*C)`: the tangency
-/// portfolio is undefined when the risk-free rate is at or above the
-/// minimum-variance return `A/C` (in particular when `rf` exceeds every
-/// expected return) and numerically meaningless when `rf` sits within a
-/// relative 1e-6 of `A/C` (the weights scale like `1/(A - rf C)` and reach
-/// gross leverage of 1e6+). [`PortOptError::InvalidInput`] on malformed
-/// inputs (non-finite `rf`, ...).
+/// As [`tangency_weights_capped`].
 pub fn tangency_weights(mu: &[f64], sigma: &Matrix, rf: f64) -> Result<Vec<f64>> {
+    tangency_weights_capped(mu, sigma, rf, TANGENCY_MAX_LEVERAGE)
+}
+
+/// Tangency weights with an explicit cap `max_leverage` (>= 1; `+inf`
+/// disables it) on the gross leverage `sum_i |w_i|`.
+///
+/// # Errors
+/// [`PortOptError::TangencyUndefined`] if `A - rf*C <= 0` (rf at or above
+/// the minimum-variance return `A/C`, in particular above every expected
+/// return) or if the gross leverage exceeds `max_leverage` (the weights
+/// scale like `1/(A - rf C)`, so rf just below `A/C` gives an allocation
+/// that is an artefact of the estimate of `A/C`).
+/// [`PortOptError::InvalidInput`] on malformed inputs (non-finite `rf`,
+/// `max_leverage` below 1 or NaN, ...).
+pub fn tangency_weights_capped(
+    mu: &[f64],
+    sigma: &Matrix,
+    rf: f64,
+    max_leverage: f64,
+) -> Result<Vec<f64>> {
     validate_mu_sigma(mu, sigma)?;
     if !rf.is_finite() {
         return Err(PortOptError::InvalidInput("rf must be finite".into()));
+    }
+    if max_leverage.is_nan() || max_leverage < 1.0 {
+        return Err(PortOptError::InvalidInput(format!(
+            "max_leverage must be >= 1 (got {max_leverage})"
+        )));
     }
     if sigma.nrows() == 1 {
         validate_1x1(sigma)?;
@@ -168,20 +194,16 @@ pub fn tangency_weights(mu: &[f64], sigma: &Matrix, rf: f64) -> Result<Vec<f64>>
                 .into(),
         ));
     }
-    // Conditioning guard: A - rf*C is a difference of two O(A) numbers.
-    let a: f64 = chol_solve(&low, mu)?.iter().sum();
-    let c: f64 = chol_solve(&low, &vec![1.0; mu.len()])?.iter().sum();
-    let scale = a.abs().max(rf.abs() * c);
-    if denom <= TANGENCY_COND_RTOL * scale {
+    let w: Vec<f64> = z.iter().map(|v| v / denom).collect();
+    let lev = gross_leverage(&w)?;
+    if lev > max_leverage {
         return Err(PortOptError::TangencyUndefined(format!(
-            "tangency ill-conditioned: A - rf*C = {denom:.3e} is within a relative \
-             {TANGENCY_COND_RTOL:e} of cancelling (rf within {TANGENCY_COND_RTOL:e} of the \
-             minimum-variance return {:.6}); weights would carry gross leverage of order \
-             1e6 or more",
-            a / c
+            "tangency ill-conditioned: gross leverage {lev:.4} exceeds max_leverage \
+             {max_leverage} (A - rf*C = {denom:.3e}; rf is too close below the \
+             minimum-variance return A/C)"
         )));
     }
-    Ok(z.iter().map(|v| v / denom).collect())
+    Ok(w)
 }
 
 /// Gross exposure `sum_i |w_i|` (1.0 for any long-only portfolio); a desk
@@ -541,12 +563,32 @@ pub struct QpResult {
     pub kkt_residual: f64,
 }
 
+/// Output of the cost-aware (turnover-penalised) QP solvers.
+#[derive(Debug, Clone)]
+pub struct TurnoverQpResult {
+    /// Feasible weights (bounds exact, budget to rounding).
+    pub weights: Vec<f64>,
+    /// Dual active-set iterations on the split problem.
+    pub iterations: usize,
+    /// True iff the KKT conditions of the original nonsmooth problem are
+    /// certified at `weights` (primal feasibility including the turnover
+    /// cap, stationarity with an L1 subgradient, cap multiplier >= 0 and
+    /// complementarity).
+    pub converged: bool,
+    /// Largest violation found by that certificate.
+    pub kkt_residual: f64,
+    /// `sum_i |w_i - w0_i|` of `weights` (compensated sum).
+    pub turnover: f64,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Equality,
     Lower,
     Upper,
     Fixed,
+    /// General inequality row `a'x >= b`, placed after the bounds.
+    Inequality,
 }
 
 struct Constraint {
@@ -556,21 +598,35 @@ struct Constraint {
     normal: Vec<f64>,
 }
 
-/// Goldfarb-Idnani dual active-set method for `min 1/2 w'Sw` s.t.
-/// `a_eq w = b_eq`, `lo <= w <= hi` (API_SPEC 3.6). Constraints are
-/// `n_c'w >= b_c`: the equalities (rows of `a_eq`, then every fixed
-/// coordinate `lo_i == hi_i`; added first, multipliers unrestricted), then
-/// the lower bounds and the finite upper bounds of the non-fixed
-/// coordinates.
-#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
-fn dual_active_set_qp(
+/// Final state of the dual active-set loop.
+struct GiState {
+    w: Vec<f64>,
+    active: Vec<usize>,
+    u: Vec<f64>,
+    iterations: usize,
+    cons: Vec<Constraint>,
+    meq: usize,
+    low: Matrix,
+}
+
+/// Goldfarb-Idnani loop for `min 1/2 x'Sx - lin'x` s.t. `a_eq x = b_eq`,
+/// `a_in x >= b_in`, `lo <= x <= hi` (API_SPEC 3.6, 3.7). `lin = None`
+/// means no linear term (start at `x = 0`); otherwise the loop starts at
+/// the unconstrained minimizer `S^-1 lin` and is unchanged (the step
+/// directions do not depend on `lin`). Constraint order: equality rows,
+/// fixed coordinates, lower bounds, finite upper bounds, inequality rows.
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
+fn gi_loop(
     s: &Matrix,
+    lin: Option<&[f64]>,
     a_eq: &[Vec<f64>],
     b_eq: &[f64],
+    a_in: &[Vec<f64>],
+    b_in: &[f64],
     lo: &[f64],
     hi: &[f64],
     max_iter: usize,
-) -> Result<QpResult> {
+) -> Result<GiState> {
     let n = s.nrows();
     let low = cholesky(s)?;
     let unit = |i: usize, sign: f64| {
@@ -618,9 +674,20 @@ fn dual_active_set_qp(
             });
         }
     }
+    for (j, row) in a_in.iter().enumerate() {
+        cons.push(Constraint {
+            kind: Kind::Inequality,
+            idx: j,
+            rhs: b_in[j],
+            normal: row.clone(),
+        });
+    }
     let n_cons = cons.len();
 
-    let mut w = vec![0.0; n];
+    let mut w = match lin {
+        None => vec![0.0; n],
+        Some(l) => chol_solve(&low, l)?,
+    };
     let mut active: Vec<usize> = Vec::new();
     let mut u: Vec<f64> = Vec::new();
     let mut skipped = vec![false; n_cons];
@@ -739,6 +806,42 @@ fn dual_active_set_qp(
             u.remove(j);
         }
     }
+    Ok(GiState {
+        w,
+        active,
+        u,
+        iterations,
+        cons,
+        meq,
+        low,
+    })
+}
+
+/// Goldfarb-Idnani dual active-set method for `min 1/2 w'Sw` s.t.
+/// `a_eq w = b_eq`, `lo <= w <= hi` (API_SPEC 3.6). Constraints are
+/// `n_c'w >= b_c`: the equalities (rows of `a_eq`, then every fixed
+/// coordinate `lo_i == hi_i`; added first, multipliers unrestricted), then
+/// the lower bounds and the finite upper bounds of the non-fixed
+/// coordinates.
+#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
+fn dual_active_set_qp(
+    s: &Matrix,
+    a_eq: &[Vec<f64>],
+    b_eq: &[f64],
+    lo: &[f64],
+    hi: &[f64],
+    max_iter: usize,
+) -> Result<QpResult> {
+    let n = s.nrows();
+    let GiState {
+        mut w,
+        active,
+        mut u,
+        iterations,
+        cons,
+        meq,
+        low,
+    } = gi_loop(s, None, a_eq, b_eq, &[], &[], lo, hi, max_iter)?;
     // Polish: minimizer on the final active set in closed form,
     // w = S^-1 N u with (N' S^-1 N) u = b_active, plus one step of iterative
     // refinement on the equality residual.
@@ -780,7 +883,7 @@ fn dual_active_set_qp(
         match cons[c].kind {
             Kind::Lower | Kind::Fixed => w[cons[c].idx] = lo[cons[c].idx],
             Kind::Upper => w[cons[c].idx] = hi[cons[c].idx],
-            Kind::Equality => {}
+            Kind::Equality | Kind::Inequality => {}
         }
     }
     // KKT certificate on the polished point.
@@ -1095,6 +1198,482 @@ pub fn constrained_frontier(
     })
 }
 
+// ---------------------------------------------------------- cost-aware QP
+
+fn abs_diff_sum(w: &[f64], w0: &[f64]) -> f64 {
+    kahan_sum(w.iter().zip(w0).map(|(a, b)| (a - b).abs()))
+}
+
+/// KKT certificate of `min 1/2 w'Sw - c'w + kappa sum|w - w0|` over
+/// `{sum w = 1, lo <= w <= hi, sum|w - w0| <= cap}` at `w`, with budget
+/// multiplier `nu` and cap multiplier `tau` (API_SPEC 3.7). With
+/// `k = kappa + tau` and `g = S w - c - nu 1`, `-g_i` must lie in the
+/// subdifferential of `k |w_i - w0_i|` plus the box indicator at `w_i`;
+/// `tau >= 0`; `tau > 0` only with a binding cap. Returns
+/// `(certified, residual)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn turnover_certificate(
+    s: &Matrix,
+    c: &[f64],
+    w0: &[f64],
+    kappa: f64,
+    lo: &[f64],
+    hi: &[f64],
+    cap: f64,
+    nu: f64,
+    tau: f64,
+    w: &[f64],
+) -> (bool, f64) {
+    let n = w.len();
+    let k = kappa + tau;
+    let mut rhs_scale = 1.0_f64;
+    for i in 0..n {
+        rhs_scale = rhs_scale.max(w0[i].abs()).max(lo[i].abs());
+        if hi[i].is_finite() {
+            rhs_scale = rhs_scale.max(hi[i].abs());
+        }
+    }
+    if cap.is_finite() {
+        rhs_scale = rhs_scale.max(cap);
+    }
+    let turnover = abs_diff_sum(w, w0);
+    let mut feas = (kahan_sum(w.iter().copied()) - 1.0).abs();
+    for i in 0..n {
+        feas = feas.max(lo[i] - w[i]).max(w[i] - hi[i]);
+    }
+    if cap.is_finite() {
+        feas = feas.max(turnover - cap);
+    }
+    let sw = s.matvec(w);
+    let mut sw_max = 0.0_f64;
+    let mut c_max = 0.0_f64;
+    for i in 0..n {
+        sw_max = sw_max.max(sw[i].abs());
+        c_max = c_max.max(c[i].abs());
+    }
+    let stat_scale = nu.abs() + k + sw_max + c_max;
+    let stat_tol = QP_CONV_TOL * (1.0 + stat_scale);
+    let mut dual = (-tau).max(0.0);
+    if tau > stat_tol && cap.is_finite() {
+        feas = feas.max(cap - turnover); // complementarity
+    }
+    for i in 0..n {
+        let d = w[i] - w0[i];
+        let at_lo = w[i] <= lo[i] + QP_CONV_TOL * (1.0 + lo[i].abs());
+        let at_hi = hi[i].is_finite() && w[i] >= hi[i] - QP_CONV_TOL * (1.0 + hi[i].abs());
+        let at_w0 = d.abs() <= QP_CONV_TOL * (1.0 + w0[i].abs());
+        let xi = -(sw[i] - c[i] - nu);
+        if !at_lo {
+            let s_left = if at_w0 || d < 0.0 { -k } else { k };
+            dual = dual.max(s_left - xi);
+        }
+        if !at_hi {
+            let s_right = if at_w0 || d > 0.0 { k } else { -k };
+            dual = dual.max(xi - s_right);
+        }
+    }
+    let certified = feas <= QP_CONV_TOL * (1.0 + rhs_scale) && dual <= stat_tol;
+    (certified, feas.max(dual))
+}
+
+/// Pinned cost-aware QP (API_SPEC 3.7); inputs already validated.
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)] // index loops mirror the Python reference
+fn turnover_qp(
+    s: &Matrix,
+    c: &[f64],
+    w0: &[f64],
+    kappa: f64,
+    lo: &[f64],
+    hi: &[f64],
+    cap: f64,
+    max_iter: usize,
+) -> Result<TurnoverQpResult> {
+    let n = s.nrows();
+    if n == 1 {
+        return Ok(TurnoverQpResult {
+            weights: vec![1.0],
+            iterations: 0,
+            converged: true,
+            kkt_residual: 0.0,
+            turnover: (1.0 - w0[0]).abs(),
+        });
+    }
+    let low = cholesky(s)?;
+    // eps = 0.5 / trace(S^-1) <= lambda_min(S) / 2 keeps S - eps I SPD; the
+    // split problem is exactly equivalent for any 0 < eps < lambda_min(S).
+    let mut tr = 0.0;
+    for j in 0..n {
+        let mut e = vec![0.0; n];
+        e[j] = 1.0;
+        tr += chol_solve(&low, &e)?[j];
+    }
+    let eps = 0.5 / tr;
+    let m = 3 * n;
+    let mut h = Matrix::zeros(m, m);
+    for i in 0..n {
+        for j in 0..n {
+            h.set(i, j, s.get(i, j));
+        }
+    }
+    for i in 0..n {
+        h.set(i, i, s.get(i, i) - eps);
+        h.set(n + i, n + i, eps);
+        h.set(2 * n + i, 2 * n + i, eps);
+    }
+    let mut lin = vec![0.0; m];
+    for i in 0..n {
+        lin[i] = c[i] - eps * w0[i];
+        lin[n + i] = -kappa;
+        lin[2 * n + i] = -kappa;
+    }
+    let mut a_eq = vec![vec![0.0; m]; n + 1];
+    let mut b_eq = vec![0.0; n + 1];
+    for i in 0..n {
+        a_eq[0][i] = 1.0;
+    }
+    b_eq[0] = 1.0;
+    for i in 0..n {
+        a_eq[1 + i][i] = 1.0;
+        a_eq[1 + i][n + i] = -1.0;
+        a_eq[1 + i][2 * n + i] = 1.0;
+        b_eq[1 + i] = w0[i];
+    }
+    let mut lo3 = vec![0.0; m];
+    let mut hi3 = vec![f64::INFINITY; m];
+    lo3[..n].copy_from_slice(lo);
+    hi3[..n].copy_from_slice(hi);
+    let mut a_in: Vec<Vec<f64>> = Vec::new();
+    let mut b_in: Vec<f64> = Vec::new();
+    if cap.is_finite() {
+        let mut row = vec![0.0; m];
+        for v in row.iter_mut().skip(n) {
+            *v = -1.0;
+        }
+        a_in.push(row);
+        b_in.push(-cap);
+    }
+    let st = gi_loop(
+        &h,
+        Some(&lin),
+        &a_eq,
+        &b_eq,
+        &a_in,
+        &b_in,
+        &lo3,
+        &hi3,
+        max_iter,
+    )?;
+
+    // States from the active set (fixed at a bound, held at w0, or free on
+    // the buy / sell side).
+    let mut at_lo: Vec<bool> = (0..n).map(|i| lo[i] == hi[i]).collect();
+    let mut at_hi = vec![false; n];
+    let mut b_act = vec![false; n];
+    let mut s_act = vec![false; n];
+    let mut cap_act = false;
+    for &cidx in &st.active {
+        let con = &st.cons[cidx];
+        match con.kind {
+            Kind::Inequality => cap_act = true,
+            Kind::Upper => at_hi[con.idx] = true,
+            Kind::Lower | Kind::Fixed => {
+                if con.idx < n {
+                    at_lo[con.idx] = true;
+                } else if con.idx < 2 * n {
+                    b_act[con.idx - n] = true;
+                } else {
+                    s_act[con.idx - 2 * n] = true;
+                }
+            }
+            Kind::Equality => {}
+        }
+    }
+    let mut is_fixed = vec![false; n];
+    let mut fix_val = vec![0.0; n];
+    let mut sgn = vec![0.0; n];
+    for i in 0..n {
+        if at_lo[i] {
+            is_fixed[i] = true;
+            fix_val[i] = lo[i];
+        } else if at_hi[i] {
+            is_fixed[i] = true;
+            fix_val[i] = hi[i];
+        } else if b_act[i] && s_act[i] {
+            is_fixed[i] = true;
+            fix_val[i] = w0[i];
+        } else if s_act[i] {
+            sgn[i] = 1.0;
+        } else if b_act[i] {
+            sgn[i] = -1.0;
+        } else {
+            sgn[i] = if st.w[n + i] - st.w[2 * n + i] >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+        }
+    }
+
+    // Exact polish in w alone on the face {sum w = 1, [cap row], w_i = fix_i}.
+    let mut normals: Vec<Vec<f64>> = vec![vec![1.0; n]];
+    let mut rhs: Vec<f64> = vec![1.0];
+    if cap_act {
+        let mut b_cap = -cap;
+        let mut row = vec![0.0; n];
+        for i in 0..n {
+            row[i] = -sgn[i];
+            if is_fixed[i] {
+                b_cap += (fix_val[i] - w0[i]).abs();
+            } else {
+                b_cap -= sgn[i] * w0[i];
+            }
+        }
+        normals.push(row);
+        rhs.push(b_cap);
+    }
+    for i in 0..n {
+        if is_fixed[i] {
+            let mut e = vec![0.0; n];
+            e[i] = 1.0;
+            normals.push(e);
+            rhs.push(fix_val[i]);
+        }
+    }
+    let c_eff: Vec<f64> = (0..n).map(|i| c[i] - kappa * sgn[i]).collect();
+    let x0 = chol_solve(&low, &c_eff)?;
+    let q = normals.len();
+    let mut ys: Vec<Vec<f64>> = Vec::with_capacity(q);
+    for nr in &normals {
+        ys.push(chol_solve(&low, nr)?);
+    }
+    let mut gram = Matrix::zeros(q, q);
+    for i in 0..q {
+        for j in i..q {
+            let gij = dot(&normals[i], &ys[j]);
+            gram.set(i, j, gij);
+            gram.set(j, i, gij);
+        }
+    }
+    let low_g = match cholesky(&gram) {
+        Ok(l) => l,
+        Err(_) => {
+            // Dependent face rows: the loop iterate is returned uncertified.
+            let w_bad: Vec<f64> = (0..n).map(|k| clip(st.w[k], lo[k], hi[k])).collect();
+            let to_bad = abs_diff_sum(&w_bad, w0);
+            return Ok(TurnoverQpResult {
+                weights: w_bad,
+                iterations: st.iterations,
+                converged: false,
+                kkt_residual: f64::INFINITY,
+                turnover: to_bad,
+            });
+        }
+    };
+    let rb: Vec<f64> = (0..q).map(|i| rhs[i] - dot(&normals[i], &x0)).collect();
+    let u_arr = chol_solve(&low_g, &rb)?;
+    let mut w = x0.clone();
+    for i in 0..q {
+        for k in 0..n {
+            w[k] += u_arr[i] * ys[i][k];
+        }
+    }
+    let resid: Vec<f64> = (0..q).map(|i| rhs[i] - dot(&normals[i], &w)).collect();
+    let du = chol_solve(&low_g, &resid)?;
+    for i in 0..q {
+        for k in 0..n {
+            w[k] += du[i] * ys[i][k];
+        }
+    }
+    for i in 0..n {
+        if is_fixed[i] {
+            w[i] = fix_val[i];
+        }
+    }
+    let nu = u_arr[0] + du[0];
+    let tau = if cap_act { u_arr[1] + du[1] } else { 0.0 };
+    let (converged, kkt_residual) = turnover_certificate(s, c, w0, kappa, lo, hi, cap, nu, tau, &w);
+    for k in 0..n {
+        w[k] = clip(w[k], lo[k], hi[k]);
+    }
+    let turnover = abs_diff_sum(&w, w0);
+    Ok(TurnoverQpResult {
+        weights: w,
+        iterations: st.iterations,
+        converged,
+        kkt_residual,
+        turnover,
+    })
+}
+
+/// Shared validation of the cost-aware entry points (API_SPEC 3.7).
+fn turnover_setup(
+    sigma: &Matrix,
+    w0: &[f64],
+    kappa: f64,
+    lb: Option<&[f64]>,
+    ub: Option<&[f64]>,
+    max_turnover: f64,
+    max_iter: usize,
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    let (lo, hi) = qp_setup(sigma, lb, ub, max_iter)?;
+    let n = sigma.nrows();
+    if w0.len() != n {
+        return Err(PortOptError::InvalidInput(format!(
+            "w0 length {} does not match sigma dimension {n}",
+            w0.len()
+        )));
+    }
+    if !w0.iter().all(|v| v.is_finite()) {
+        return Err(PortOptError::InvalidInput(
+            "w0 contains NaN or infinite entries".into(),
+        ));
+    }
+    if !kappa.is_finite() || kappa < 0.0 {
+        return Err(PortOptError::InvalidInput(format!(
+            "kappa must be finite and >= 0 (got {kappa})"
+        )));
+    }
+    if max_turnover.is_nan() || max_turnover < 0.0 {
+        return Err(PortOptError::InvalidInput(format!(
+            "max_turnover must be >= 0 (got {max_turnover})"
+        )));
+    }
+    if max_turnover.is_finite() {
+        // Smallest attainable turnover: clip w0 into the box, then move the
+        // budget gap |1 - sum(clip)|; no feasible portfolio does better.
+        let wc: Vec<f64> = (0..n).map(|i| clip(w0[i], lo[i], hi[i])).collect();
+        let to_min = abs_diff_sum(&wc, w0) + (1.0 - kahan_sum(wc.iter().copied())).abs();
+        if max_turnover < to_min - 1e-12 * (1.0 + to_min) {
+            return Err(PortOptError::Infeasible(format!(
+                "infeasible turnover cap: max_turnover = {max_turnover} is below the \
+                 smallest attainable turnover {to_min}"
+            )));
+        }
+    }
+    Ok((lo, hi))
+}
+
+fn require_turnover_converged(res: TurnoverQpResult, what: &str) -> Result<Vec<f64>> {
+    if !res.converged {
+        return Err(PortOptError::Undefined(format!(
+            "{what}: cost-aware QP not certified after {} iterations (KKT residual {:.3e}); \
+             the input is degenerate, use the *_solve variant to inspect the iterate",
+            res.iterations, res.kkt_residual
+        )));
+    }
+    Ok(res.weights)
+}
+
+/// Cost-aware minimum variance (API_SPEC 3.7):
+/// `min 1/2 w'Sw + kappa sum_i |w_i - w0_i|` s.t. `sum w = 1`,
+/// `lb <= w <= ub` and, when `max_turnover` is finite,
+/// `sum_i |w_i - w0_i| <= max_turnover` (`f64::INFINITY` = no cap).
+/// `kappa >= 0` is in the objective's (variance) units. Solved by the
+/// dual active-set QP on the split problem `w = w0 + b - s` with Hessian
+/// `diag(S - eps I, eps I, eps I)`, `eps = 0.5 / trace(S^-1)`, which is
+/// strictly convex and exactly equivalent (no perturbation), then
+/// re-polished in `w` on the identified face and certified.
+///
+/// # Errors
+/// [`PortOptError::InvalidInput`] / [`PortOptError::Infeasible`] on
+/// invalid input, infeasible bounds or a cap below the smallest attainable
+/// turnover; [`PortOptError::NotPositiveDefinite`] for a singular sigma.
+pub fn min_variance_turnover_solve(
+    sigma: &Matrix,
+    w0: &[f64],
+    kappa: f64,
+    lb: Option<&[f64]>,
+    ub: Option<&[f64]>,
+    max_turnover: f64,
+    max_iter: usize,
+) -> Result<TurnoverQpResult> {
+    let (lo, hi) = turnover_setup(sigma, w0, kappa, lb, ub, max_turnover, max_iter)?;
+    let c = vec![0.0; sigma.nrows()];
+    turnover_qp(sigma, &c, w0, kappa, &lo, &hi, max_turnover, max_iter)
+}
+
+/// Weights of [`min_variance_turnover_solve`] with the pinned iteration cap.
+///
+/// # Errors
+/// As the solve variant, plus [`PortOptError::Undefined`] if the KKT
+/// certificate fails.
+pub fn min_variance_turnover(
+    sigma: &Matrix,
+    w0: &[f64],
+    kappa: f64,
+    lb: Option<&[f64]>,
+    ub: Option<&[f64]>,
+    max_turnover: f64,
+) -> Result<Vec<f64>> {
+    require_turnover_converged(
+        min_variance_turnover_solve(sigma, w0, kappa, lb, ub, max_turnover, QP_MAX_ITER)?,
+        "min_variance_turnover",
+    )
+}
+
+/// Cost-aware mean-variance (API_SPEC 3.7):
+/// `min 1/2 w'Sw - mu'w / risk_aversion + kappa sum_i |w_i - w0_i|` over
+/// the same feasible set (`risk_aversion > 0`). Same method and
+/// certificate as [`min_variance_turnover_solve`].
+///
+/// # Errors
+/// As [`min_variance_turnover_solve`], plus
+/// [`PortOptError::InvalidInput`] for a bad `mu` or `risk_aversion`.
+#[allow(clippy::too_many_arguments)]
+pub fn mean_variance_turnover_solve(
+    mu: &[f64],
+    sigma: &Matrix,
+    w0: &[f64],
+    risk_aversion: f64,
+    kappa: f64,
+    lb: Option<&[f64]>,
+    ub: Option<&[f64]>,
+    max_turnover: f64,
+    max_iter: usize,
+) -> Result<TurnoverQpResult> {
+    validate_mu_sigma(mu, sigma)?;
+    if !risk_aversion.is_finite() || risk_aversion <= 0.0 {
+        return Err(PortOptError::InvalidInput(format!(
+            "risk_aversion must be finite and > 0 (got {risk_aversion})"
+        )));
+    }
+    let (lo, hi) = turnover_setup(sigma, w0, kappa, lb, ub, max_turnover, max_iter)?;
+    let c: Vec<f64> = mu.iter().map(|v| v / risk_aversion).collect();
+    turnover_qp(sigma, &c, w0, kappa, &lo, &hi, max_turnover, max_iter)
+}
+
+/// Weights of [`mean_variance_turnover_solve`] with the pinned iteration cap.
+///
+/// # Errors
+/// As the solve variant, plus [`PortOptError::Undefined`] if the KKT
+/// certificate fails.
+#[allow(clippy::too_many_arguments)]
+pub fn mean_variance_turnover(
+    mu: &[f64],
+    sigma: &Matrix,
+    w0: &[f64],
+    risk_aversion: f64,
+    kappa: f64,
+    lb: Option<&[f64]>,
+    ub: Option<&[f64]>,
+    max_turnover: f64,
+) -> Result<Vec<f64>> {
+    require_turnover_converged(
+        mean_variance_turnover_solve(
+            mu,
+            sigma,
+            w0,
+            risk_aversion,
+            kappa,
+            lb,
+            ub,
+            max_turnover,
+            QP_MAX_ITER,
+        )?,
+        "mean_variance_turnover",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,6 +1707,43 @@ mod tests {
         let eq_only = vec![vec![1.0, 1.0]];
         let (ok, _) = kkt_certificate(&s, &eq_only, &[-1.0], 1, &[0], &[-0.5], &[-0.5, -0.5]);
         assert!(ok);
+    }
+
+    #[test]
+    fn turnover_certificate_rejects_wrong_points() {
+        // S = diag(0.04, 0.09, 0.01), w0 = 1/3 each, kappa = 1e-3: the
+        // optimum is certified; a wrong budget multiplier, a perturbed
+        // point, a negative cap multiplier and tau > 0 with a slack cap fail.
+        let s = diag_sigma();
+        let w0 = [1.0 / 3.0; 3];
+        let kappa = 1e-3;
+        let r =
+            min_variance_turnover_solve(&s, &w0, kappa, None, None, f64::INFINITY, 1000).unwrap();
+        assert!(r.converged);
+        let w = r.weights.clone();
+        let lo = [0.0; 3];
+        let hi = [f64::INFINITY; 3];
+        let c = [0.0; 3];
+        let free: Vec<usize> = (0..3)
+            .filter(|&i| w[i] > 1e-9 && (w[i] - w0[i]).abs() > 1e-9)
+            .collect();
+        assert!(free.len() >= 2);
+        let i0 = free[0];
+        let nu = s.matvec(&w)[i0] + kappa * (w[i0] - w0[i0]).signum();
+        let inf = f64::INFINITY;
+        let (ok, res) = turnover_certificate(&s, &c, &w0, kappa, &lo, &hi, inf, nu, 0.0, &w);
+        assert!(ok && res < 1e-12);
+        let (ok, _) = turnover_certificate(&s, &c, &w0, kappa, &lo, &hi, inf, nu * 1.01, 0.0, &w);
+        assert!(!ok);
+        let mut wp = w.clone();
+        wp[free[0]] += 1e-4;
+        wp[free[1]] -= 1e-4;
+        let (ok, _) = turnover_certificate(&s, &c, &w0, kappa, &lo, &hi, inf, nu, 0.0, &wp);
+        assert!(!ok);
+        let (ok, _) = turnover_certificate(&s, &c, &w0, kappa, &lo, &hi, 10.0, nu, -1e-3, &w);
+        assert!(!ok);
+        let (ok, _) = turnover_certificate(&s, &c, &w0, kappa, &lo, &hi, 10.0, nu, 1e-3, &w);
+        assert!(!ok);
     }
 
     #[test]

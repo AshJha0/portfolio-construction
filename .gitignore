@@ -21,3 +21,6 @@ venv/
 *.iml
 .DS_Store
 Thumbs.db
+
+# Third-party data is fetched at run time and never committed (see data/real/README.md)
+data/real/raw/

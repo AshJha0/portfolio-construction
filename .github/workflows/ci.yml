@@ -183,3 +183,30 @@ jobs:
         with:
           name: demo-outputs
           path: out/
+
+  benchmarks-smoke:
+    name: Benchmarks build and smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e python && python python/benchmarks/bench_kernels.py --quick --sizes 8
+      - name: C++ (Google Benchmark)
+        run: |
+          cmake -S cpp -B build-bench -DCMAKE_BUILD_TYPE=Release -DPORTOPT_WERROR=ON -DPORTOPT_BUILD_TESTS=OFF -DPORTOPT_BUILD_BENCHMARKS=ON
+          cmake --build build-bench -j 4 --target portopt_bench
+          ./build-bench/portopt_bench --benchmark_min_time=0.01s --benchmark_filter='/8$'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust (criterion, test mode)
+        working-directory: rust
+        run: cargo bench --bench kernels -- --test
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Java (JMH)
+        working-directory: java
+        run: mvn -B -q -Pbench package && java -jar target/benchmarks.jar -wi 0 -i 1 -r 100ms -f 1 -p n=8

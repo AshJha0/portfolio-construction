@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import portopt as po
+from portopt.estimators import _EXACT_SAMPLE_MAX_N, _shrink_covariance_reference
 
 
 def test_sample_moments_match_numpy(returns):
@@ -183,3 +184,61 @@ def test_sample_moments_bit_stable_under_row_order_change(returns):
     perm = np.random.default_rng(9).permutation(returns.shape[0])
     assert np.array_equal(po.sample_mean(returns), po.sample_mean(returns[perm]))
     assert np.array_equal(po.sample_cov(returns), po.sample_cov(returns[perm]))
+
+
+def _assert_matches_reference(x: np.ndarray, rtol: float = 1e-13) -> None:
+    """The vectorised default against the pinned loop implementation.
+    Scalars are compared relative to themselves, matrices relative to their
+    largest entry (an off-diagonal covariance near zero has no meaningful
+    element-wise relative error)."""
+    fast = po.shrink_covariance(x)
+    ref = _shrink_covariance_reference(x)
+    assert abs(fast.intensity - ref.intensity) <= rtol * abs(ref.intensity)
+    assert abs(fast.rbar - ref.rbar) <= rtol * abs(ref.rbar)
+    for name in ("sigma", "sample", "target"):
+        a, b = getattr(fast, name), getattr(ref, name)
+        assert np.max(np.abs(a - b)) <= rtol * np.max(np.abs(b)), name
+    if x.shape[1] <= _EXACT_SAMPLE_MAX_N:
+        # design range: the covariance, target and rbar are bit-identical
+        assert np.array_equal(fast.sample, ref.sample)
+        assert np.array_equal(fast.target, ref.target)
+        assert fast.rbar == ref.rbar
+
+
+def test_lw_fast_path_matches_reference_on_bundled_data(returns):
+    _assert_matches_reference(returns)
+    _assert_matches_reference(returns[:5])  # T <= N, delta near 1
+    _assert_matches_reference(returns[:, :2])  # gamma_hat = 0, delta = 0
+
+
+@pytest.mark.parametrize("n", [2, 3, 8, 20, 21, 50, 100])
+def test_lw_fast_path_matches_reference_on_random_problems(n):
+    """One-factor panels with unequal vols (rbar well away from zero), T
+    both above and below N."""
+    rng = np.random.default_rng(1000 + n)
+    for t in (60, 400):
+        factor = rng.standard_normal((t, 1))
+        loadings = 0.3 + 0.7 * rng.random((1, n))
+        vols = 0.005 + 0.02 * rng.random(n)
+        x = vols * (factor * loadings + rng.standard_normal((t, n)))
+        _assert_matches_reference(x)
+
+
+def test_lw_fast_path_tiling_does_not_change_results(monkeypatch):
+    """The (i, j, t) tile size is a cache knob only: every tiling, including
+    one (i, j) pair per tile and column-split rows, gives bit-identical
+    output, and the split path still matches the loop reference."""
+    from portopt import estimators
+
+    rng = np.random.default_rng(7)
+    t, n = 300, 30
+    x = 0.01 * (rng.standard_normal((t, 1)) + rng.standard_normal((t, n))) * (1 + rng.random(n))
+    base = po.shrink_covariance(x)
+    for tile in (1, 500, 10**4, 10**7):
+        monkeypatch.setattr(estimators, "_TILE_ELEMS", tile)
+        res = po.shrink_covariance(x)
+        assert res.intensity == base.intensity
+        assert np.array_equal(res.sigma, base.sigma)
+        assert np.array_equal(res.sample, base.sample)
+    monkeypatch.setattr(estimators, "_TILE_ELEMS", 500)
+    _assert_matches_reference(x)
