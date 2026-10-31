@@ -33,15 +33,19 @@ the exact KKT point of the QP up to rounding, so all language ports agree
 to ~1e-13 and the ``converged`` flag is a statement about the KKT
 conditions, not about an iterate step size.
 """
+
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Sequence
 
 import numpy as np
 
-from .linalg import cholesky, chol_solve
+from .linalg import chol_solve, cholesky
+
+# Box bounds: a scalar, a per-asset sequence or array, or None for the default.
+Bounds = Sequence[float] | float | np.ndarray | None
 
 __all__ = [
     "TangencyUndefinedError",
@@ -79,11 +83,11 @@ QP_FEAS_TOL = 1.0e-13
 QP_DEGENERATE_TOL = 1.0e-9
 #: Pinned KKT certificate tolerance: ``converged`` requires every equality
 #: residual and bound violation <= QP_CONV_TOL * (1 + max|rhs|) and the
-#: stationarity residual |S w - N u| <= QP_CONV_TOL * (1 + scale).
+#: stationarity residual |S w - N u| <= QP_CONV_TOL * (1 + scale), and every
+#: active bound multiplier u_c >= -QP_CONV_TOL * (1 + scale) (same scale).
 QP_CONV_TOL = 1.0e-9
 #: Pinned relative conditioning threshold for the tangency denominator.
 TANGENCY_COND_RTOL = 1.0e-6
-
 
 
 class TangencyUndefinedError(ValueError):
@@ -97,9 +101,7 @@ def _validate_mu_sigma(mu: np.ndarray, sigma: np.ndarray) -> tuple[np.ndarray, n
     if s.ndim != 2 or s.shape[0] != s.shape[1]:
         raise ValueError(f"sigma must be square, got shape {s.shape}")
     if m.shape[0] != s.shape[0]:
-        raise ValueError(
-            f"mu length {m.shape[0]} does not match sigma dimension {s.shape[0]}"
-        )
+        raise ValueError(f"mu length {m.shape[0]} does not match sigma dimension {s.shape[0]}")
     if not np.isfinite(m).all():
         raise ValueError("mu contains NaN or infinite entries")
     return m, s
@@ -254,9 +256,7 @@ def frontier_weights(mu: np.ndarray, sigma: np.ndarray, target: float) -> np.nda
     if s.shape[0] == 1:
         _validate_1x1(s)
         if abs(tgt - m[0]) > 1e-12 * (1.0 + abs(m[0])):
-            raise ValueError(
-                "n=1: target return must equal the single asset's expected return"
-            )
+            raise ValueError("n=1: target return must equal the single asset's expected return")
         return np.array([1.0])
     g, h, mv_ret = _two_fund_gh(m, s)
     if tgt < mv_ret - 1e-12 * (1.0 + abs(mv_ret)):
@@ -314,16 +314,16 @@ def efficient_frontier(
 
 def _broadcast_bounds(
     n: int,
-    lb: Optional[Sequence[float] | float],
-    ub: Optional[Sequence[float] | float],
+    lb: Bounds,
+    ub: Bounds,
     total: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    lo = np.zeros(n) if lb is None else np.broadcast_to(
-        np.asarray(lb, dtype=float), (n,)
-    ).copy()
-    hi = np.full(n, np.inf) if ub is None else np.broadcast_to(
-        np.asarray(ub, dtype=float), (n,)
-    ).copy()
+    lo = np.zeros(n) if lb is None else np.broadcast_to(np.asarray(lb, dtype=float), (n,)).copy()
+    hi = (
+        np.full(n, np.inf)
+        if ub is None
+        else np.broadcast_to(np.asarray(ub, dtype=float), (n,)).copy()
+    )
     if np.any(np.isnan(lo)) or np.any(np.isnan(hi)):
         raise ValueError("bounds contain NaN")
     if not np.isfinite(lo).all():
@@ -336,21 +336,17 @@ def _broadcast_bounds(
     hi_sum = float(np.sum(hi))
     feas_tol = 1e-12 * (1.0 + abs(total))
     if lo_sum > total + feas_tol:
-        raise ValueError(
-            f"infeasible bounds: sum(lb) = {lo_sum:.6g} exceeds total {total:.6g}"
-        )
+        raise ValueError(f"infeasible bounds: sum(lb) = {lo_sum:.6g} exceeds total {total:.6g}")
     if hi_sum < total - feas_tol:
-        raise ValueError(
-            f"infeasible bounds: sum(ub) = {hi_sum:.6g} is below total {total:.6g}"
-        )
+        raise ValueError(f"infeasible bounds: sum(ub) = {hi_sum:.6g} is below total {total:.6g}")
     return lo, hi
 
 
 def project_simplex_box(
     v: np.ndarray,
     total: float = 1.0,
-    lb: Optional[Sequence[float] | float] = None,
-    ub: Optional[Sequence[float] | float] = None,
+    lb: Bounds = None,
+    ub: Bounds = None,
 ) -> np.ndarray:
     """Exact Euclidean projection onto {w : sum w = total, lb <= w <= ub}.
 
@@ -385,7 +381,9 @@ def project_simplex_box(
     lo, hi = _broadcast_bounds(n, lb, ub, s)
 
     def g(t: float) -> float:
-        return float(math.fsum(min(max(float(x[i] - t), float(lo[i])), float(hi[i])) for i in range(n)))
+        return float(
+            math.fsum(min(max(float(x[i] - t), float(lo[i])), float(hi[i])) for i in range(n))
+        )
 
     bps = [x[i] - lo[i] for i in range(n)]
     for i in range(n):
@@ -401,8 +399,10 @@ def project_simplex_box(
         k = int(np.sum(~np.isfinite(hi)))
         if k == 0:
             # sum(ub) >= s guarantees g_first >= s up to rounding; snap.
-            return np.clip(x - t_first, lo, hi)
-        return np.clip(x - (t_first - (s - g_first) / k), lo, hi)
+            out: np.ndarray = np.clip(x - t_first, lo, hi)
+            return out
+        out = np.clip(x - (t_first - (s - g_first) / k), lo, hi)
+        return out
 
     t_prev, g_prev = t_first, g_first
     for t_cur in bps[1:]:
@@ -412,10 +412,12 @@ def project_simplex_box(
                 t_star = t_cur
             else:
                 t_star = t_prev + (g_prev - s) * (t_cur - t_prev) / (g_prev - g_cur)
-            return np.clip(x - t_star, lo, hi)
+            out = np.clip(x - t_star, lo, hi)
+            return out
         t_prev, g_prev = t_cur, g_cur
     # Right of every breakpoint g(t) = sum(lb) <= s; feasibility means equality.
-    return np.clip(x - bps[-1], lo, hi)
+    out = np.clip(x - bps[-1], lo, hi)
+    return out
 
 
 # --------------------------------------------------------------------- QP
@@ -434,15 +436,16 @@ class QpResult:
         Dual active-set iterations executed (constraint additions/drops).
     converged:
         True iff the KKT conditions are certified at the returned point:
-        primal feasibility and stationarity ``S w = N u`` within
-        ``QP_CONV_TOL`` (bound multipliers are non-negative by
-        construction).  False means the iteration cap was hit or the
+        primal feasibility, stationarity ``S w = N u`` and dual
+        feasibility (every active bound multiplier ``>= 0``), each within
+        ``QP_CONV_TOL`` (relative; see :func:`_kkt_certificate`).  False means the iteration cap was hit or the
         constraint set proved numerically inconsistent — the returned
         weights are then not certified optimal.
     kkt_residual:
         Largest KKT violation at ``weights``: max of the equality
-        residuals, bound violations and the stationarity residual
-        ``|S w - N u|_inf`` (N = active normals, u = multipliers).
+        residuals, bound violations, the stationarity residual
+        ``|S w - N u|_inf`` (N = active normals, u = multipliers) and the
+        dual-feasibility violation ``max(0, -min u_bound)``.
     """
 
     weights: np.ndarray
@@ -474,8 +477,8 @@ def _greedy_extreme(
 
 def attainable_return_range(
     mu: np.ndarray,
-    lb: Optional[Sequence[float] | float] = None,
-    ub: Optional[Sequence[float] | float] = None,
+    lb: Bounds = None,
+    ub: Bounds = None,
 ) -> tuple[float, float]:
     """Range ``[r_min, r_max]`` of ``mu'w`` over ``{sum w = 1, lb <= w <= ub}``.
 
@@ -493,10 +496,55 @@ def attainable_return_range(
 
 def _constraint_normal(n: int, a_eq: np.ndarray, kind: int, idx: int) -> np.ndarray:
     if kind == 0:
-        return a_eq[idx].copy()
+        row: np.ndarray = a_eq[idx].copy()
+        return row
     e = np.zeros(n)
     e[idx] = -1.0 if kind == 2 else 1.0
     return e
+
+
+def _kkt_certificate(
+    s: np.ndarray,
+    normals: Sequence[np.ndarray],
+    rhs: np.ndarray,
+    meq: int,
+    active: Sequence[int],
+    u: Sequence[float],
+    w: np.ndarray,
+) -> tuple[bool, float]:
+    """KKT certificate of ``min 1/2 w'Sw`` s.t. ``n_c'w >= b_c`` (the first
+    ``meq`` constraints are equalities) at ``w`` with active set ``active``
+    and multipliers ``u`` (``u[i]`` belongs to constraint ``active[i]``).
+
+    Checks primal feasibility (equality residuals and inequality
+    violations ``<= QP_CONV_TOL * (1 + max|b|)``), stationarity
+    ``|S w - N u|_inf <= QP_CONV_TOL * (1 + stat_scale)`` and dual
+    feasibility ``u_i >= -QP_CONV_TOL * (1 + stat_scale)`` for every active
+    inequality, where ``stat_scale = |S w|_inf + sum_i |u_i| |n_i|_inf`` (a
+    multiplier has the units of the gradient, so it shares the stationarity
+    scale).  Returns ``(certified, residual)`` with ``residual`` the largest
+    of the feasibility, stationarity and dual-feasibility violations.
+    """
+    feas = 0.0
+    rhs_scale = 0.0
+    for c in range(len(normals)):
+        viol = float(normals[c] @ w) - rhs[c]
+        rhs_scale = max(rhs_scale, abs(rhs[c]))
+        feas = max(feas, abs(viol) if c < meq else -viol)
+    stat = s @ w
+    stat_scale = float(np.max(np.abs(stat)))
+    dual = 0.0
+    for i, c in enumerate(active):
+        stat = stat - u[i] * normals[c]
+        stat_scale += abs(u[i]) * float(np.max(np.abs(normals[c])))
+        if c >= meq:
+            dual = max(dual, -u[i])
+    stat_res = float(np.max(np.abs(stat)))
+    stat_tol = QP_CONV_TOL * (1.0 + stat_scale)
+    certified = (
+        feas <= QP_CONV_TOL * (1.0 + rhs_scale) and stat_res <= stat_tol and dual <= stat_tol
+    )
+    return certified, max(feas, stat_res, dual)
 
 
 def _dual_active_set_qp(
@@ -650,30 +698,16 @@ def _dual_active_set_qp(
             w[i] = lo[i]
         elif kind == 2:
             w[i] = hi[i]
-    # KKT certificate on the polished point: primal feasibility, and
-    # stationarity S w = N u with u >= 0 on the inequalities (guaranteed by
-    # construction).  ``converged`` is this certificate, independent of how
-    # the loop terminated.
-    feas = 0.0
-    rhs_scale = 0.0
-    for c in range(n_cons):
-        viol = float(normals[c] @ w) - rhs[c]
-        rhs_scale = max(rhs_scale, abs(rhs[c]))
-        feas = max(feas, abs(viol) if c < meq else -viol)
-    stat = s @ w
-    stat_scale = float(np.max(np.abs(stat)))
-    for i, c in enumerate(active):
-        stat = stat - u[i] * normals[c]
-        stat_scale += abs(u[i]) * float(np.max(np.abs(normals[c])))
-    stat_res = float(np.max(np.abs(stat)))
-    converged = (
-        feas <= QP_CONV_TOL * (1.0 + rhs_scale) and stat_res <= QP_CONV_TOL * (1.0 + stat_scale)
-    )
+    # KKT certificate on the polished point (``converged`` is this
+    # certificate, independent of how the loop terminated).
+    converged, kkt_residual = _kkt_certificate(s, normals, rhs, meq, active, u, w)
     w = np.clip(w, lo, hi)
-    return QpResult(w, iterations, converged, max(feas, stat_res))
+    return QpResult(w, iterations, converged, kkt_residual)
 
 
-def _qp_setup(sigma: np.ndarray, lb, ub, max_iter: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _qp_setup(
+    sigma: np.ndarray, lb: Bounds, ub: Bounds, max_iter: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     s = np.asarray(sigma, dtype=float)
     if s.ndim != 2 or s.shape[0] != s.shape[1]:
         raise ValueError(f"sigma must be square, got shape {s.shape}")
@@ -686,8 +720,8 @@ def _qp_setup(sigma: np.ndarray, lb, ub, max_iter: int) -> tuple[np.ndarray, np.
 
 def min_variance_longonly_solve(
     sigma: np.ndarray,
-    lb: Optional[Sequence[float] | float] = None,
-    ub: Optional[Sequence[float] | float] = None,
+    lb: Bounds = None,
+    ub: Bounds = None,
     max_iter: int = QP_MAX_ITER,
 ) -> QpResult:
     """Constrained minimum variance ``min 1/2 w'Sw`` over the box-simplex.
@@ -714,8 +748,8 @@ def _require_converged(res: QpResult, what: str) -> np.ndarray:
 
 def min_variance_longonly(
     sigma: np.ndarray,
-    lb: Optional[Sequence[float] | float] = None,
-    ub: Optional[Sequence[float] | float] = None,
+    lb: Bounds = None,
+    ub: Bounds = None,
     max_iter: int = QP_MAX_ITER,
 ) -> np.ndarray:
     """Weights of :func:`min_variance_longonly_solve`; raises ValueError if
@@ -774,8 +808,12 @@ def _frontier_point(
             elif m[i] < cut:
                 hi2[i] = lo[i]
         res = _dual_active_set_qp(s, np.ones((1, n)), np.array([1.0]), lo2, hi2, max_iter)
-        return QpResult(res.weights, res.iterations, res.converged,
-                        max(res.kkt_residual, abs(float(m @ res.weights) - tgt)))
+        return QpResult(
+            res.weights,
+            res.iterations,
+            res.converged,
+            max(res.kkt_residual, abs(float(m @ res.weights) - tgt)),
+        )
     a_eq = np.vstack([np.ones(n), m])
     b_eq = np.array([1.0, tgt])
     return _dual_active_set_qp(s, a_eq, b_eq, lo, hi, max_iter)
@@ -785,8 +823,8 @@ def constrained_frontier_solve(
     mu: np.ndarray,
     sigma: np.ndarray,
     target: float,
-    lb: Optional[Sequence[float] | float] = None,
-    ub: Optional[Sequence[float] | float] = None,
+    lb: Bounds = None,
+    ub: Bounds = None,
     max_iter: int = QP_MAX_ITER,
 ) -> QpResult:
     """Constrained frontier point: ``min 1/2 w'Sw`` subject to
@@ -815,8 +853,8 @@ def constrained_frontier_weights(
     mu: np.ndarray,
     sigma: np.ndarray,
     target: float,
-    lb: Optional[Sequence[float] | float] = None,
-    ub: Optional[Sequence[float] | float] = None,
+    lb: Bounds = None,
+    ub: Bounds = None,
     max_iter: int = QP_MAX_ITER,
 ) -> np.ndarray:
     """Weights of :func:`constrained_frontier_solve`; raises ValueError if
@@ -831,8 +869,8 @@ def constrained_frontier(
     mu: np.ndarray,
     sigma: np.ndarray,
     n_points: int = 25,
-    lb: Optional[Sequence[float] | float] = None,
-    ub: Optional[Sequence[float] | float] = None,
+    lb: Bounds = None,
+    ub: Bounds = None,
     max_iter: int = QP_MAX_ITER,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Constrained frontier sweep on the pinned grid from the constrained
@@ -848,7 +886,8 @@ def constrained_frontier(
         raise ValueError("n_points must be >= 2")
     s, lo, hi = _qp_setup(sigma, lb, ub, max_iter)
     w_gmv = _require_converged(
-        min_variance_longonly_solve(s, lo, hi, max_iter), "constrained_frontier (min-variance point)"
+        min_variance_longonly_solve(s, lo, hi, max_iter),
+        "constrained_frontier (min-variance point)",
     )
     r_gmv = float(m @ w_gmv)
     r_min, r_max = attainable_return_range(m, lo, hi)

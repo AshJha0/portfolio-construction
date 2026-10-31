@@ -9,6 +9,44 @@
 
 namespace portopt {
 
+namespace detail {
+
+KktCertificate kkt_certificate(const Matrix& s, const std::vector<Vector>& normals,
+                               const Vector& rhs, std::size_t meq,
+                               const std::vector<std::size_t>& active, const Vector& u,
+                               const Vector& w) {
+  const std::size_t n = s.rows();
+  double feas = 0.0;
+  double rhs_scale = 0.0;
+  for (std::size_t c = 0; c < normals.size(); ++c) {
+    const double viol = dot(normals[c], w) - rhs[c];
+    rhs_scale = std::max(rhs_scale, std::fabs(rhs[c]));
+    feas = std::max(feas, c < meq ? std::fabs(viol) : -viol);
+  }
+  Vector stat = mat_vec(s, w);
+  double stat_scale = 0.0;
+  for (double v : stat) stat_scale = std::max(stat_scale, std::fabs(v));
+  double dual = 0.0;
+  for (std::size_t i = 0; i < active.size(); ++i) {
+    const Vector& nc = normals[active[i]];
+    double nmax = 0.0;
+    for (std::size_t k = 0; k < n; ++k) {
+      stat[k] -= u[i] * nc[k];
+      nmax = std::max(nmax, std::fabs(nc[k]));
+    }
+    stat_scale += std::fabs(u[i]) * nmax;
+    if (active[i] >= meq) dual = std::max(dual, -u[i]);
+  }
+  double stat_res = 0.0;
+  for (double v : stat) stat_res = std::max(stat_res, std::fabs(v));
+  const double stat_tol = kQpConvTol * (1.0 + stat_scale);
+  const bool certified = feas <= kQpConvTol * (1.0 + rhs_scale) && stat_res <= stat_tol &&
+                         dual <= stat_tol;
+  return KktCertificate{certified, std::max({feas, stat_res, dual})};
+}
+
+}  // namespace detail
+
 namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
@@ -347,31 +385,18 @@ QpResult dual_active_set_qp(const Matrix& s, const std::vector<Vector>& a_eq,
       w[cons[c].idx] = hi[cons[c].idx];
     }
   }
-  // KKT certificate on the polished point.
-  double feas = 0.0;
-  double rhs_scale = 0.0;
+  // KKT certificate on the polished point (independent of how the loop
+  // terminated).
+  std::vector<Vector> normals(n_cons);
+  Vector rhs(n_cons, 0.0);
   for (std::size_t c = 0; c < n_cons; ++c) {
-    const double viol = dot(cons[c].normal, w) - cons[c].rhs;
-    rhs_scale = std::max(rhs_scale, std::fabs(cons[c].rhs));
-    feas = std::max(feas, c < meq ? std::fabs(viol) : -viol);
+    normals[c] = cons[c].normal;
+    rhs[c] = cons[c].rhs;
   }
-  Vector stat = mat_vec(s, w);
-  double stat_scale = 0.0;
-  for (double v : stat) stat_scale = std::max(stat_scale, std::fabs(v));
-  for (std::size_t i = 0; i < q; ++i) {
-    double nmax = 0.0;
-    for (std::size_t k = 0; k < n; ++k) {
-      stat[k] -= u[i] * cons[active[i]].normal[k];
-      nmax = std::max(nmax, std::fabs(cons[active[i]].normal[k]));
-    }
-    stat_scale += std::fabs(u[i]) * nmax;
-  }
-  double stat_res = 0.0;
-  for (double v : stat) stat_res = std::max(stat_res, std::fabs(v));
-  const bool converged =
-      feas <= kQpConvTol * (1.0 + rhs_scale) && stat_res <= kQpConvTol * (1.0 + stat_scale);
+  const detail::KktCertificate cert =
+      detail::kkt_certificate(s, normals, rhs, meq, active, u, w);
   for (std::size_t k = 0; k < n; ++k) w[k] = clip(w[k], lo[k], hi[k]);
-  return QpResult{w, iterations, converged, std::max(feas, stat_res)};
+  return QpResult{w, iterations, cert.certified, cert.residual};
 }
 
 /// Shared QP setup: square + SPD gate, bound validation, iteration cap.

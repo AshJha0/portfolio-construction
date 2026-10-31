@@ -44,7 +44,11 @@ pub struct Matrix {
 impl Matrix {
     /// Zero matrix of the given shape (both dimensions must be > 0).
     pub fn zeros(rows: usize, cols: usize) -> Self {
-        Matrix { rows, cols, data: vec![0.0; rows * cols] }
+        Matrix {
+            rows,
+            cols,
+            data: vec![0.0; rows * cols],
+        }
     }
 
     /// Identity matrix of order `n`.
@@ -62,7 +66,9 @@ impl Matrix {
     /// [`PortOptError::InvalidInput`] on an empty matrix or ragged rows.
     pub fn from_rows(rows: &[Vec<f64>]) -> Result<Self> {
         if rows.is_empty() || rows[0].is_empty() {
-            return Err(PortOptError::InvalidInput("matrix must be non-empty".into()));
+            return Err(PortOptError::InvalidInput(
+                "matrix must be non-empty".into(),
+            ));
         }
         let cols = rows[0].len();
         let mut data = Vec::with_capacity(rows.len() * cols);
@@ -75,7 +81,11 @@ impl Matrix {
             }
             data.extend_from_slice(r);
         }
-        Ok(Matrix { rows: rows.len(), cols, data })
+        Ok(Matrix {
+            rows: rows.len(),
+            cols,
+            data,
+        })
     }
 
     /// Square matrix from a flat row-major slice of length `n*n`.
@@ -86,7 +96,11 @@ impl Matrix {
                 data.len()
             )));
         }
-        Ok(Matrix { rows: n, cols: n, data: data.to_vec() })
+        Ok(Matrix {
+            rows: n,
+            cols: n,
+            data: data.to_vec(),
+        })
     }
 
     /// Diagonal matrix from a slice.
@@ -206,7 +220,9 @@ pub fn check_square_symmetric(a: &Matrix) -> Result<()> {
         )));
     }
     if a.nrows() == 0 {
-        return Err(PortOptError::InvalidInput("matrix must be non-empty".into()));
+        return Err(PortOptError::InvalidInput(
+            "matrix must be non-empty".into(),
+        ));
     }
     if !a.is_finite() {
         return Err(PortOptError::InvalidInput(
@@ -283,6 +299,7 @@ pub fn cholesky(a: &Matrix) -> Result<Matrix> {
 ///
 /// # Errors
 /// [`PortOptError::InvalidInput`] if `b` does not match the factor's order.
+#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
 pub fn chol_solve(low: &Matrix, b: &[f64]) -> Result<Vec<f64>> {
     let n = low.nrows();
     if b.len() != n {
@@ -320,6 +337,7 @@ pub fn spd_solve(a: &Matrix, b: &[f64]) -> Result<Vec<f64>> {
 ///
 /// Pinned: factor once, then solve `A x_j = e_j` for unit vectors `e_j`,
 /// `j = 0..n-1`, stacking the solutions as columns. No post-symmetrization.
+#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
 pub fn spd_inverse(a: &Matrix) -> Result<Matrix> {
     let low = cholesky(a)?;
     let n = low.nrows();
@@ -381,8 +399,7 @@ mod tests {
 
     #[test]
     fn rejects_indefinite_singular_asymmetric_nan() {
-        let indef =
-            Matrix::from_rows(&[vec![1.0, 2.0], vec![2.0, 1.0]]).unwrap();
+        let indef = Matrix::from_rows(&[vec![1.0, 2.0], vec![2.0, 1.0]]).unwrap();
         assert!(matches!(
             cholesky(&indef),
             Err(PortOptError::NotPositiveDefinite(_))
@@ -393,7 +410,10 @@ mod tests {
             Err(PortOptError::NotPositiveDefinite(_))
         ));
         let asym = Matrix::from_rows(&[vec![1.0, 0.5], vec![0.0, 1.0]]).unwrap();
-        assert!(matches!(cholesky(&asym), Err(PortOptError::InvalidInput(_))));
+        assert!(matches!(
+            cholesky(&asym),
+            Err(PortOptError::InvalidInput(_))
+        ));
         let nan = Matrix::from_rows(&[vec![1.0, f64::NAN], vec![f64::NAN, 1.0]]).unwrap();
         assert!(matches!(cholesky(&nan), Err(PortOptError::InvalidInput(_))));
     }

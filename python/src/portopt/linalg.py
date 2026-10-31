@@ -13,6 +13,7 @@ C++/Rust/Java must reproduce bit-for-bit up to IEEE-754 rounding:
 numpy is used only as an array container; all loops are explicit so the
 operation order is pinned.
 """
+
 from __future__ import annotations
 
 import math
@@ -64,9 +65,7 @@ def check_square_symmetric(a: np.ndarray) -> np.ndarray:
     scale = 1.0 + float(np.max(np.abs(m)))
     asym = float(np.max(np.abs(m - m.T)))
     if asym > _SYM_TOL * scale:
-        raise ValueError(
-            f"matrix is not symmetric (max asymmetry {asym:.3e} exceeds tolerance)"
-        )
+        raise ValueError(f"matrix is not symmetric (max asymmetry {asym:.3e} exceeds tolerance)")
     return m
 
 
@@ -93,8 +92,7 @@ def cholesky(a: np.ndarray) -> np.ndarray:
     for i in range(n):
         if m[i, i] <= 0.0:
             raise ValueError(
-                f"matrix is not positive definite (diagonal entry {m[i, i]:.3e} "
-                f"<= 0 at row {i})"
+                f"matrix is not positive definite (diagonal entry {m[i, i]:.3e} <= 0 at row {i})"
             )
         for j in range(i + 1):
             s = m[i, j]

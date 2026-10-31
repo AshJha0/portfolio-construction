@@ -51,6 +51,7 @@ pub fn validate_returns(returns: &Matrix, min_rows: usize) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0.0)` is deliberate: it rejects NaN as well as non-positive values
 fn validate_periods(periods: f64) -> Result<()> {
     if !(periods > 0.0) || !periods.is_finite() {
         return Err(PortOptError::InvalidInput(
@@ -138,6 +139,7 @@ pub struct ShrinkageResult {
 /// # Errors
 /// [`PortOptError::InvalidInput`] for `N < 2`, `T < 2`, non-finite input,
 /// or a non-positive sample variance.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0.0)` is deliberate: it rejects NaN as well as non-positive values
 pub fn shrink_covariance(returns: &Matrix) -> Result<ShrinkageResult> {
     validate_returns(returns, 2)?;
     let (t, n) = (returns.nrows(), returns.ncols());
@@ -170,7 +172,15 @@ pub fn shrink_covariance(returns: &Matrix) -> Result<ShrinkageResult> {
     let mut f_t = Matrix::zeros(n, n);
     for i in 0..n {
         for j in 0..n {
-            f_t.set(i, j, if i == j { var_t[i] } else { rbar * sd_t[i] * sd_t[j] });
+            f_t.set(
+                i,
+                j,
+                if i == j {
+                    var_t[i]
+                } else {
+                    rbar * sd_t[i] * sd_t[j]
+                },
+            );
         }
     }
 
@@ -211,12 +221,22 @@ pub fn shrink_covariance(returns: &Matrix) -> Result<ShrinkageResult> {
     let mut sigma = Matrix::zeros(n, n);
     for i in 0..n {
         for j in 0..n {
-            let fij = if i == j { s.get(i, i) } else { rbar * sd[i] * sd[j] };
+            let fij = if i == j {
+                s.get(i, i)
+            } else {
+                rbar * sd[i] * sd[j]
+            };
             f.set(i, j, fij);
             sigma.set(i, j, intensity * fij + (1.0 - intensity) * s.get(i, j));
         }
     }
-    Ok(ShrinkageResult { sigma, intensity, rbar, sample: s, target: f })
+    Ok(ShrinkageResult {
+        sigma,
+        intensity,
+        rbar,
+        sample: s,
+        target: f,
+    })
 }
 
 /// Annualize a per-period mean vector: `mu_ann = periods * mu`.

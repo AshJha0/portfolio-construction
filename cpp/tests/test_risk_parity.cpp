@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <stdexcept>
+#include <string>
 
 #include "portopt/risk_parity.hpp"
 #include "test_data.hpp"
@@ -163,4 +165,30 @@ TEST(RiskParity, CcdCapReportedNotThrown) {
     s += v;
   }
   EXPECT_NEAR(s, 1.0, 1e-12);
+}
+
+TEST(RiskParity, WeightsOnlyWrappersThrowOnSweepCap) {
+  // Two sweeps leave an RC spread of order 1e-4: the weights-only wrappers
+  // must throw (naming sweeps and tol) instead of returning it silently.
+  const Matrix& sig = testdata::sigma_ann();
+  const portopt::RiskBudgetResult r =
+      portopt::risk_budget_solve(sig, Vector(), portopt::kCcdTol, 2);
+  EXPECT_FALSE(r.converged);
+  EXPECT_EQ(r.sweeps, 2);
+  try {
+    (void)portopt::erc_weights(sig, portopt::kCcdTol, 2);
+    FAIL() << "erc_weights did not throw at the sweep cap";
+  } catch (const std::domain_error& e) {
+    EXPECT_NE(std::string(e.what()).find("within 2 sweeps (tol 1.000e-10)"),
+              std::string::npos)
+        << e.what();
+  }
+  Vector budgets(sig.rows(), 0.5 / static_cast<double>(sig.rows() - 1));
+  budgets[0] = 0.5;
+  EXPECT_THROW((void)portopt::risk_budget_weights(sig, budgets, portopt::kCcdTol, 2),
+               std::domain_error);
+  // Default cap: converged, and the wrapper agrees bit-for-bit with the solver.
+  const portopt::RiskBudgetResult ok = portopt::risk_budget_solve(sig);
+  ASSERT_TRUE(ok.converged);
+  EXPECT_EQ(portopt::erc_weights(sig), ok.weights);
 }

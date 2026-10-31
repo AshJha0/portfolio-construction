@@ -28,14 +28,16 @@ import java.util.Arrays;
  * <p>Pinned iteration: initialize {@code y_i = 1/n}; cache {@code sy = Sigma y}
  * and update it incrementally after each coordinate change; sweep coordinates
  * in ascending order. Converged when {@code max_i |y_i - y_prev_sweep_i| <
- * 1e-10} after a full sweep; at most 10000 sweeps (non-convergence is flagged,
- * never thrown).
+ * 1e-10} after a full sweep; at most 10000 sweeps. {@link #riskBudgetSolve}
+ * flags non-convergence; the weights-only wrappers {@link #riskBudgetWeights}
+ * and {@link #ercWeights} throw IllegalArgumentException when the sweep cap is
+ * hit (the same convention as the weights-only QP wrappers in Markowitz).
  */
 public final class RiskParity {
 
     /** Pinned sweep-level convergence tolerance. */
     public static final double CCD_TOL = 1.0e-10;
-    /** Pinned sweep cap (non-convergence is flagged, never thrown). */
+    /** Pinned sweep cap (flagged by riskBudgetSolve; the weights-only wrappers throw). */
     public static final int CCD_MAX_SWEEPS = 10_000;
 
     private RiskParity() {
@@ -207,9 +209,33 @@ public final class RiskParity {
      * @param sigma   SPD covariance
      * @param budgets target risk budgets, or null for equal budgets (ERC)
      * @return long-only weights on the simplex
+     * @throws IllegalArgumentException if the CCD hits the sweep cap
      */
     public static double[] riskBudgetWeights(double[][] sigma, double[] budgets) {
-        return riskBudgetSolve(sigma, budgets, CCD_TOL, CCD_MAX_SWEEPS).weights();
+        return riskBudgetWeights(sigma, budgets, CCD_TOL, CCD_MAX_SWEEPS);
+    }
+
+    /**
+     * Risk-budget weights (weights only; see {@link #riskBudgetSolve}).
+     *
+     * @param sigma     SPD covariance
+     * @param budgets   target risk budgets, or null for equal budgets (ERC)
+     * @param tol       sweep-level convergence tolerance
+     * @param maxSweeps sweep cap
+     * @return long-only weights on the simplex
+     * @throws IllegalArgumentException if the CCD hits the sweep cap before the
+     *         sweep-level step falls below {@code tol} (message names sweeps and tol)
+     */
+    public static double[] riskBudgetWeights(double[][] sigma, double[] budgets, double tol,
+            int maxSweeps) {
+        Solution sol = riskBudgetSolve(sigma, budgets, tol, maxSweeps);
+        if (!sol.converged()) {
+            throw new IllegalArgumentException(String.format(
+                    "risk_budget_weights: CCD did not converge within %d sweeps (tol %.3e); "
+                            + "use riskBudgetSolve to inspect the iterate",
+                    sol.sweeps(), tol));
+        }
+        return sol.weights();
     }
 
     /**
@@ -217,8 +243,22 @@ public final class RiskParity {
      *
      * @param sigma SPD covariance
      * @return ERC weights
+     * @throws IllegalArgumentException if the CCD hits the sweep cap
      */
     public static double[] ercWeights(double[][] sigma) {
         return riskBudgetWeights(sigma, null);
+    }
+
+    /**
+     * Equal-risk-contribution weights with an explicit tolerance and sweep cap.
+     *
+     * @param sigma     SPD covariance
+     * @param tol       sweep-level convergence tolerance
+     * @param maxSweeps sweep cap
+     * @return ERC weights
+     * @throws IllegalArgumentException if the CCD hits the sweep cap
+     */
+    public static double[] ercWeights(double[][] sigma, double tol, int maxSweeps) {
+        return riskBudgetWeights(sigma, null, tol, maxSweeps);
     }
 }

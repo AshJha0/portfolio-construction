@@ -1,0 +1,20 @@
+flowchart TD
+    TRIG["push to main, pull request, manual dispatch"] --> PY
+    TRIG --> CPP
+    TRIG --> SAN
+    TRIG --> RS
+    TRIG --> MSRV
+    TRIG --> JV
+    TRIG --> PAR
+    PY["python: 3.11 and 3.13 on Ubuntu, Windows, macOS<br/>ruff, mypy, pytest, demo"]
+    CPP["cpp: C++26 on Ubuntu (GCC 14), Windows (MSVC), macOS<br/>configure with PORTOPT_WERROR, build, ctest, demo"]
+    SAN["cpp-sanitizers: Clang ASan and UBSan, Debug, ctest"]
+    RS["rust: stable on three OS<br/>fmt, clippy, test, doc, demo"]
+    MSRV["rust-msrv: cargo test on 1.78"]
+    JV["java: 25 and 27 on three OS<br/>mvn verify, demo"]
+    PAR["demo-parity: build and run all four demos on Ubuntu"]
+    PAR --> DIFF["scripts/demo_parity.py: every line must match the Python demo"]
+    GOLD["data/golden/golden.json"] -.-> PY
+    GOLD -.-> CPP
+    GOLD -.-> RS
+    GOLD -.-> JV

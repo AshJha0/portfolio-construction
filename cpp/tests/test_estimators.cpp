@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <utility>
 
 #include "portopt/estimators.hpp"
 #include "portopt/linalg.hpp"

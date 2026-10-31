@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portopt"
+version = "1.2.0"
+description = "Portfolio construction reference implementation: Markowitz, Ledoit-Wolf, Black-Litterman, risk parity"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ashish Jha" }]
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "scipy>=1.10", "ruff>=0.6", "mypy>=1.10"]
+docs = ["matplotlib>=3.7"]
+
+[project.urls]
+Homepage = "https://ashjha0.github.io/portfolio-construction/"
+Repository = "https://github.com/AshJha0/portfolio-construction"
+Changelog = "https://github.com/AshJha0/portfolio-construction/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+portopt = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+# Line length is the formatter's job; E501 only flags what it cannot split.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["portopt", "conftest"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]

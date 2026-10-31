@@ -195,4 +195,27 @@ public class RiskParityTest {
         assertArrayEquals(d.weights(), a.weights(), 1e-10);
         assertArrayEquals(d.weights(), k.weights(), 1e-10);
     }
+
+    @Test
+    public void weightsOnlyWrappersThrowOnSweepCap() {
+        // Two sweeps leave an RC spread of order 1e-4: the weights-only
+        // wrappers must throw (naming sweeps and tol), not return it silently.
+        double[][] sig = TestData.sigmaAnnualized();
+        RiskParity.Solution capped = RiskParity.riskBudgetSolve(sig, null, RiskParity.CCD_TOL, 2);
+        assertTrue(!capped.converged());
+        assertEquals(2, capped.sweeps());
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> RiskParity.ercWeights(sig, RiskParity.CCD_TOL, 2));
+        assertTrue(e.getMessage(), e.getMessage().contains("within 2 sweeps (tol 1.000e-10)"));
+        double[] budgets = new double[sig.length];
+        java.util.Arrays.fill(budgets, 0.5 / (sig.length - 1));
+        budgets[0] = 0.5;
+        assertThrows(IllegalArgumentException.class,
+                () -> RiskParity.riskBudgetWeights(sig, budgets, RiskParity.CCD_TOL, 2));
+        // Default cap: converged, and the wrapper agrees bit-for-bit with the solver.
+        RiskParity.Solution ok = RiskParity.riskBudgetSolve(
+                sig, null, RiskParity.CCD_TOL, RiskParity.CCD_MAX_SWEEPS);
+        assertTrue(ok.converged());
+        assertArrayEquals(ok.weights(), RiskParity.ercWeights(sig), 0.0);
+    }
 }

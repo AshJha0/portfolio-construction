@@ -91,7 +91,8 @@ public final class Markowitz {
      * @param iterations  dual active-set iterations (constraint adds/drops)
      * @param converged   KKT certificate holds at {@code weights} (see QP_CONV_TOL)
      * @param kktResidual largest KKT violation: equality residuals, bound
-     *                    violations and the stationarity residual |S w - N u|
+     *                    violations, the stationarity residual |S w - N u| and
+     *                    the dual-feasibility violation max(0, -min u_bound)
      */
     public record QpResult(double[] weights, int iterations, boolean converged, double kktResidual) {
     }
@@ -838,13 +839,54 @@ public final class Markowitz {
                 w[con.idx()] = hi[con.idx()];
             }
         }
-        // KKT certificate on the polished point.
+        // KKT certificate on the polished point (independent of how the loop
+        // terminated).
+        double[][] normals = new double[nCons][];
+        double[] rhs = new double[nCons];
+        for (int c = 0; c < nCons; c++) {
+            normals[c] = cons.get(c).normal();
+            rhs[c] = cons.get(c).rhs();
+        }
+        int[] act = new int[q];
+        for (int i = 0; i < q; i++) {
+            act[i] = active.get(i);
+        }
+        KktCertificate cert = kktCertificate(s, normals, rhs, meq, act, uArr, w);
+        for (int k = 0; k < n; k++) {
+            w[k] = Math.min(Math.max(w[k], lo[k]), hi[k]);
+        }
+        return new QpResult(w, iterations, cert.certified(), cert.residual());
+    }
+
+    /**
+     * Result of {@link #kktCertificate}.
+     *
+     * @param certified primal, stationarity and dual feasibility all within tolerance
+     * @param residual  largest of the three violations
+     */
+    record KktCertificate(boolean certified, double residual) {
+    }
+
+    /**
+     * KKT certificate of min 1/2 w'Sw s.t. n_c'w &ge; b_c (the first {@code meq}
+     * constraints are equalities) at {@code w}, with active set {@code active}
+     * and multipliers {@code u} ({@code u[i]} belongs to constraint
+     * {@code active[i]}). Checks primal feasibility
+     * (&le; QP_CONV_TOL * (1 + max|b|)), stationarity
+     * |S w - N u|_inf &le; QP_CONV_TOL * (1 + statScale) and dual feasibility
+     * u_i &ge; -QP_CONV_TOL * (1 + statScale) for every active inequality, with
+     * statScale = |S w|_inf + sum_i |u_i| |n_i|_inf (a multiplier has the units
+     * of the gradient, so it shares the stationarity scale). Package-private
+     * for testing.
+     */
+    static KktCertificate kktCertificate(double[][] s, double[][] normals, double[] rhs,
+            int meq, int[] active, double[] u, double[] w) {
+        int n = s.length;
         double feas = 0.0;
         double rhsScale = 0.0;
-        for (int c = 0; c < nCons; c++) {
-            Constraint con = cons.get(c);
-            double viol = Linalg.dot(con.normal(), w) - con.rhs();
-            rhsScale = Math.max(rhsScale, Math.abs(con.rhs()));
+        for (int c = 0; c < normals.length; c++) {
+            double viol = Linalg.dot(normals[c], w) - rhs[c];
+            rhsScale = Math.max(rhsScale, Math.abs(rhs[c]));
             feas = Math.max(feas, c < meq ? Math.abs(viol) : -viol);
         }
         double[] stat = Linalg.matVec(s, w);
@@ -852,25 +894,27 @@ public final class Markowitz {
         for (double v : stat) {
             statScale = Math.max(statScale, Math.abs(v));
         }
-        for (int i = 0; i < q; i++) {
-            Constraint con = cons.get(active.get(i));
+        double dual = 0.0;
+        for (int i = 0; i < active.length; i++) {
+            double[] nc = normals[active[i]];
             double nmax = 0.0;
             for (int k = 0; k < n; k++) {
-                stat[k] -= uArr[i] * con.normal()[k];
-                nmax = Math.max(nmax, Math.abs(con.normal()[k]));
+                stat[k] -= u[i] * nc[k];
+                nmax = Math.max(nmax, Math.abs(nc[k]));
             }
-            statScale += Math.abs(uArr[i]) * nmax;
+            statScale += Math.abs(u[i]) * nmax;
+            if (active[i] >= meq) {
+                dual = Math.max(dual, -u[i]);
+            }
         }
         double statRes = 0.0;
         for (double v : stat) {
             statRes = Math.max(statRes, Math.abs(v));
         }
-        boolean converged = feas <= QP_CONV_TOL * (1.0 + rhsScale)
-                && statRes <= QP_CONV_TOL * (1.0 + statScale);
-        for (int k = 0; k < n; k++) {
-            w[k] = Math.min(Math.max(w[k], lo[k]), hi[k]);
-        }
-        return new QpResult(w, iterations, converged, Math.max(feas, statRes));
+        double statTol = QP_CONV_TOL * (1.0 + statScale);
+        boolean certified = feas <= QP_CONV_TOL * (1.0 + rhsScale) && statRes <= statTol
+                && dual <= statTol;
+        return new KktCertificate(certified, Math.max(feas, Math.max(statRes, dual)));
     }
 
     /** Shared QP setup: square + SPD gate, bound validation, iteration cap. */

@@ -65,6 +65,7 @@ fn validate_mu_sigma(mu: &[f64], sigma: &Matrix) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(x > 0.0)` is deliberate: it rejects NaN as well as non-positive values
 fn validate_1x1(sigma: &Matrix) -> Result<()> {
     let v = sigma.get(0, 0);
     if !(v > 0.0) || !v.is_finite() {
@@ -101,7 +102,12 @@ pub fn two_fund_scalars(mu: &[f64], sigma: &Matrix) -> Result<TwoFundScalars> {
     let a: f64 = x.iter().sum();
     let b = dot(mu, &x);
     let c: f64 = y.iter().sum();
-    Ok(TwoFundScalars { a, b, c, d: b * c - a * a })
+    Ok(TwoFundScalars {
+        a,
+        b,
+        c,
+        d: b * c - a * a,
+    })
 }
 
 /// Unconstrained (sum-to-one) minimum-variance weights `Sigma^-1 1 / C`.
@@ -146,8 +152,7 @@ pub fn tangency_weights(mu: &[f64], sigma: &Matrix, rf: f64) -> Result<Vec<f64>>
         validate_1x1(sigma)?;
         if mu[0] <= rf {
             return Err(PortOptError::TangencyUndefined(
-                "tangency undefined: risk-free rate >= expected return of the single asset"
-                    .into(),
+                "tangency undefined: risk-free rate >= expected return of the single asset".into(),
             ));
         }
         return Ok(vec![1.0]);
@@ -229,7 +234,9 @@ fn two_fund_gh(mu: &[f64], sigma: &Matrix) -> Result<(Vec<f64>, Vec<f64>, f64)> 
 pub fn frontier_weights(mu: &[f64], sigma: &Matrix, target: f64) -> Result<Vec<f64>> {
     validate_mu_sigma(mu, sigma)?;
     if !target.is_finite() {
-        return Err(PortOptError::InvalidInput("target return must be finite".into()));
+        return Err(PortOptError::InvalidInput(
+            "target return must be finite".into(),
+        ));
     }
     if sigma.nrows() == 1 {
         validate_1x1(sigma)?;
@@ -302,7 +309,11 @@ pub fn efficient_frontier(mu: &[f64], sigma: &Matrix, n_points: usize) -> Result
         variances.push(dot(&w, &sigma.matvec(&w)));
         weights.push(w);
     }
-    Ok(FrontierSweep { targets, weights, variances })
+    Ok(FrontierSweep {
+        targets,
+        weights,
+        variances,
+    })
 }
 
 fn clip(v: f64, lo: f64, hi: f64) -> f64 {
@@ -344,10 +355,14 @@ fn broadcast_bounds(
         return Err(PortOptError::InvalidInput("bounds contain NaN".into()));
     }
     if !lo.iter().all(|x| x.is_finite()) {
-        return Err(PortOptError::InvalidInput("lower bounds must be finite".into()));
+        return Err(PortOptError::InvalidInput(
+            "lower bounds must be finite".into(),
+        ));
     }
-    if hi.iter().any(|&x| x == f64::NEG_INFINITY) {
-        return Err(PortOptError::InvalidInput("upper bounds must be > -inf".into()));
+    if hi.contains(&f64::NEG_INFINITY) {
+        return Err(PortOptError::InvalidInput(
+            "upper bounds must be > -inf".into(),
+        ));
     }
     if lo.iter().zip(&hi).any(|(l, u)| l > u) {
         return Err(PortOptError::Infeasible("some lb_i > ub_i".into()));
@@ -396,7 +411,9 @@ pub fn project_simplex_box(
 ) -> Result<Vec<f64>> {
     let n = v.len();
     if n == 0 {
-        return Err(PortOptError::InvalidInput("cannot project an empty vector".into()));
+        return Err(PortOptError::InvalidInput(
+            "cannot project an empty vector".into(),
+        ));
     }
     if !v.iter().all(|x| x.is_finite()) {
         return Err(PortOptError::InvalidInput(
@@ -408,10 +425,8 @@ pub fn project_simplex_box(
     }
     let (lo, hi) = broadcast_bounds(n, lb, ub, total)?;
 
-    let clipped = |t: f64| -> Vec<f64> {
-        (0..n).map(|i| clip(v[i] - t, lo[i], hi[i])).collect()
-    };
-    let g = |t: f64| -> f64 { kahan_sum(clipped(t).into_iter()) };
+    let clipped = |t: f64| -> Vec<f64> { (0..n).map(|i| clip(v[i] - t, lo[i], hi[i])).collect() };
+    let g = |t: f64| -> f64 { kahan_sum(clipped(t)) };
 
     // Breakpoints: all v[i] - lb[i], plus v[i] - ub[i] for finite ub.
     let mut bps: Vec<f64> = (0..n).map(|i| v[i] - lo[i]).collect();
@@ -512,14 +527,17 @@ pub struct QpResult {
     pub weights: Vec<f64>,
     /// Dual active-set iterations (constraint additions/drops).
     pub iterations: usize,
-    /// True iff the KKT conditions are certified at `weights` (primal
-    /// feasibility and stationarity `S w = N u` within [`QP_CONV_TOL`];
-    /// bound multipliers are non-negative by construction). False means
+    /// True iff the KKT conditions are certified at `weights`: primal
+    /// feasibility, stationarity `S w = N u` and dual feasibility (every
+    /// active inequality multiplier `u_i >= -tol`), all within
+    /// [`QP_CONV_TOL`] relative (see `kkt_certificate`). False means
     /// the iteration cap was hit or the constraint set proved numerically
     /// inconsistent — the weights are then not certified optimal.
     pub converged: bool,
     /// Largest KKT violation at `weights`: equality residuals, bound
-    /// violations and the stationarity residual `|S w - N u|_inf`.
+    /// violations, the stationarity residual `|S w - N u|_inf` (`N` the
+    /// active normals, `u` the multipliers) and the dual-feasibility
+    /// violation `max(0, -min u_bound)`.
     pub kkt_residual: f64,
 }
 
@@ -544,6 +562,7 @@ struct Constraint {
 /// coordinate `lo_i == hi_i`; added first, multipliers unrestricted), then
 /// the lower bounds and the finite upper bounds of the non-fixed
 /// coordinates.
+#[allow(clippy::needless_range_loop)] // index loops mirror the Python reference; kept verbatim so evaluation order stays pinned to the goldens
 fn dual_active_set_qp(
     s: &Matrix,
     a_eq: &[Vec<f64>],
@@ -561,22 +580,42 @@ fn dual_active_set_qp(
     };
     let mut cons: Vec<Constraint> = Vec::new();
     for (j, row) in a_eq.iter().enumerate() {
-        cons.push(Constraint { kind: Kind::Equality, idx: j, rhs: b_eq[j], normal: row.clone() });
+        cons.push(Constraint {
+            kind: Kind::Equality,
+            idx: j,
+            rhs: b_eq[j],
+            normal: row.clone(),
+        });
     }
     for i in 0..n {
         if lo[i] == hi[i] {
-            cons.push(Constraint { kind: Kind::Fixed, idx: i, rhs: lo[i], normal: unit(i, 1.0) });
+            cons.push(Constraint {
+                kind: Kind::Fixed,
+                idx: i,
+                rhs: lo[i],
+                normal: unit(i, 1.0),
+            });
         }
     }
     let meq = cons.len();
     for i in 0..n {
         if lo[i] != hi[i] {
-            cons.push(Constraint { kind: Kind::Lower, idx: i, rhs: lo[i], normal: unit(i, 1.0) });
+            cons.push(Constraint {
+                kind: Kind::Lower,
+                idx: i,
+                rhs: lo[i],
+                normal: unit(i, 1.0),
+            });
         }
     }
     for i in 0..n {
         if lo[i] != hi[i] && hi[i].is_finite() {
-            cons.push(Constraint { kind: Kind::Upper, idx: i, rhs: -hi[i], normal: unit(i, -1.0) });
+            cons.push(Constraint {
+                kind: Kind::Upper,
+                idx: i,
+                rhs: -hi[i],
+                normal: unit(i, -1.0),
+            });
         }
     }
     let n_cons = cons.len();
@@ -655,7 +694,11 @@ fn dual_active_set_qp(
                 }
             }
         }
-        let t2 = if zn > 1e-10 * vn { -s_p / zn } else { f64::INFINITY };
+        let t2 = if zn > 1e-10 * vn {
+            -s_p / zn
+        } else {
+            f64::INFINITY
+        };
         let t = t1.min(t2);
         if !t.is_finite() {
             // n_p is a combination of the active normals and no multiplier
@@ -741,29 +784,66 @@ fn dual_active_set_qp(
         }
     }
     // KKT certificate on the polished point.
-    let mut feas = 0.0_f64;
-    let mut rhs_scale = 0.0_f64;
-    for (c, con) in cons.iter().enumerate() {
-        let viol = dot(&con.normal, &w) - con.rhs;
-        rhs_scale = rhs_scale.max(con.rhs.abs());
-        feas = feas.max(if c < meq { viol.abs() } else { -viol });
-    }
-    let mut stat = s.matvec(&w);
-    let mut stat_scale = stat.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    for i in 0..q {
-        let con = &cons[active[i]];
-        for k in 0..n {
-            stat[k] -= u[i] * con.normal[k];
-        }
-        stat_scale += u[i].abs() * con.normal.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    }
-    let stat_res = stat.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    let converged =
-        feas <= QP_CONV_TOL * (1.0 + rhs_scale) && stat_res <= QP_CONV_TOL * (1.0 + stat_scale);
+    let normals: Vec<Vec<f64>> = cons.iter().map(|c| c.normal.clone()).collect();
+    let rhs: Vec<f64> = cons.iter().map(|c| c.rhs).collect();
+    let (converged, kkt_residual) = kkt_certificate(s, &normals, &rhs, meq, &active, &u, &w);
     for k in 0..n {
         w[k] = clip(w[k], lo[k], hi[k]);
     }
-    Ok(QpResult { weights: w, iterations, converged, kkt_residual: feas.max(stat_res) })
+    Ok(QpResult {
+        weights: w,
+        iterations,
+        converged,
+        kkt_residual,
+    })
+}
+
+/// KKT certificate of `min 1/2 w'Sw` s.t. `n_c'w >= b_c` (the first `meq`
+/// constraints are equalities) at `w`, with active set `active` and
+/// multipliers `u` (`u[i]` belongs to constraint `active[i]`).
+///
+/// Checks primal feasibility (equality residuals and inequality violations
+/// `<= QP_CONV_TOL * (1 + max|b|)`), stationarity
+/// `|S w - N u|_inf <= QP_CONV_TOL * (1 + stat_scale)` and dual feasibility
+/// `u_i >= -QP_CONV_TOL * (1 + stat_scale)` for every active inequality,
+/// where `stat_scale = |S w|_inf + sum_i |u_i| |n_i|_inf` (a multiplier has
+/// the units of the gradient, so it shares the stationarity scale).
+/// Returns `(certified, residual)` with `residual` the largest of the
+/// feasibility, stationarity and dual-feasibility violations.
+pub(crate) fn kkt_certificate(
+    s: &Matrix,
+    normals: &[Vec<f64>],
+    rhs: &[f64],
+    meq: usize,
+    active: &[usize],
+    u: &[f64],
+    w: &[f64],
+) -> (bool, f64) {
+    let mut feas = 0.0_f64;
+    let mut rhs_scale = 0.0_f64;
+    for (c, normal) in normals.iter().enumerate() {
+        let viol = dot(normal, w) - rhs[c];
+        rhs_scale = rhs_scale.max(rhs[c].abs());
+        feas = feas.max(if c < meq { viol.abs() } else { -viol });
+    }
+    let mut stat = s.matvec(w);
+    let mut stat_scale = stat.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let mut dual = 0.0_f64;
+    for (i, &c) in active.iter().enumerate() {
+        let normal = &normals[c];
+        for (st, nk) in stat.iter_mut().zip(normal) {
+            *st -= u[i] * nk;
+        }
+        stat_scale += u[i].abs() * normal.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        if c >= meq {
+            dual = dual.max(-u[i]);
+        }
+    }
+    let stat_res = stat.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let stat_tol = QP_CONV_TOL * (1.0 + stat_scale);
+    let certified =
+        feas <= QP_CONV_TOL * (1.0 + rhs_scale) && stat_res <= stat_tol && dual <= stat_tol;
+    (certified, feas.max(stat_res).max(dual))
 }
 
 /// Shared QP setup: square + SPD gate, bound validation, iteration cap.
@@ -856,7 +936,12 @@ fn frontier_point(
         )));
     }
     if (tgt - r_gmv).abs() <= tol || r_max - r_min <= tol {
-        return Ok(QpResult { weights: w_gmv.to_vec(), iterations: 0, converged: true, kkt_residual: 0.0 });
+        return Ok(QpResult {
+            weights: w_gmv.to_vec(),
+            iterations: 0,
+            converged: true,
+            kkt_residual: 0.0,
+        });
     }
     let n = mu.len();
     if (tgt - r_max).abs() <= tol {
@@ -869,7 +954,12 @@ fn frontier_point(
             .map(|i| mu[i])
             .fold(f64::INFINITY, f64::min);
         if !cut.is_finite() {
-            return Ok(QpResult { weights: w_gmv.to_vec(), iterations: 0, converged: true, kkt_residual: 0.0 });
+            return Ok(QpResult {
+                weights: w_gmv.to_vec(),
+                iterations: 0,
+                converged: true,
+                kkt_residual: 0.0,
+            });
         }
         let mut lo2 = lo.to_vec();
         let mut hi2 = hi.to_vec();
@@ -884,7 +974,14 @@ fn frontier_point(
         res.kkt_residual = res.kkt_residual.max((dot(mu, &res.weights) - tgt).abs());
         return Ok(res);
     }
-    dual_active_set_qp(sigma, &[vec![1.0; n], mu.to_vec()], &[1.0, tgt], lo, hi, max_iter)
+    dual_active_set_qp(
+        sigma,
+        &[vec![1.0; n], mu.to_vec()],
+        &[1.0, tgt],
+        lo,
+        hi,
+        max_iter,
+    )
 }
 
 /// Constrained frontier point: `min 1/2 w' Sigma w` subject to
@@ -906,14 +1003,27 @@ pub fn constrained_frontier_solve(
     validate_mu_sigma(mu, sigma)?;
     let (lo, hi) = qp_setup(sigma, lb, ub, max_iter)?;
     if !target.is_finite() {
-        return Err(PortOptError::InvalidInput("target return must be finite".into()));
+        return Err(PortOptError::InvalidInput(
+            "target return must be finite".into(),
+        ));
     }
     let w_gmv = require_converged(
         min_variance_longonly_solve(sigma, Some(&lo), Some(&hi), max_iter)?,
         "constrained_frontier_solve (min-variance point)",
     )?;
     let (r_min, r_max) = attainable_return_range(mu, Some(&lo), Some(&hi))?;
-    frontier_point(mu, sigma, target, &lo, &hi, &w_gmv, dot(mu, &w_gmv), r_min, r_max, max_iter)
+    frontier_point(
+        mu,
+        sigma,
+        target,
+        &lo,
+        &hi,
+        &w_gmv,
+        dot(mu, &w_gmv),
+        r_min,
+        r_max,
+        max_iter,
+    )
 }
 
 /// Weights of [`constrained_frontier_solve`] with the pinned iteration cap.
@@ -959,12 +1069,30 @@ pub fn constrained_frontier(
     let mut weights = Vec::with_capacity(n_points);
     let mut variances = Vec::with_capacity(n_points);
     for (k, &tgt) in targets.iter().enumerate() {
-        let res = frontier_point(mu, sigma, tgt, &lo, &hi, &w_gmv, r_gmv, r_min, r_max, QP_MAX_ITER)?;
-        let w = require_converged(res, &format!("constrained_frontier point {k} (target {tgt:.6})"))?;
+        let res = frontier_point(
+            mu,
+            sigma,
+            tgt,
+            &lo,
+            &hi,
+            &w_gmv,
+            r_gmv,
+            r_min,
+            r_max,
+            QP_MAX_ITER,
+        )?;
+        let w = require_converged(
+            res,
+            &format!("constrained_frontier point {k} (target {tgt:.6})"),
+        )?;
         variances.push(dot(&w, &sigma.matvec(&w)));
         weights.push(w);
     }
-    Ok(FrontierSweep { targets, weights, variances })
+    Ok(FrontierSweep {
+        targets,
+        weights,
+        variances,
+    })
 }
 
 #[cfg(test)]
@@ -973,6 +1101,33 @@ mod tests {
 
     fn diag_sigma() -> Matrix {
         Matrix::from_diag(&[0.04, 0.09, 0.01])
+    }
+
+    #[test]
+    fn kkt_certificate_checks_dual_feasibility() {
+        // min 1/2 |w|^2 s.t. sum w = 1, w >= 0 (S = I, n = 2). The true
+        // active set {sum} gives w = (1/2, 1/2), u = 1/2 and is certified.
+        // Forcing the wrong active set {sum, w_0 >= 0} gives w = (0, 1):
+        // primal feasible and stationary (S w = 1*(1,1) - 1*e_0), but the
+        // bound multiplier is -1.
+        let s = Matrix::from_diag(&[1.0, 1.0]);
+        let normals = vec![vec![1.0, 1.0], vec![1.0, 0.0], vec![0.0, 1.0]];
+        let rhs = [1.0, 0.0, 0.0];
+        let (ok, res) = kkt_certificate(&s, &normals, &rhs, 1, &[0], &[0.5], &[0.5, 0.5]);
+        assert!(ok);
+        assert_eq!(res, 0.0);
+        let (ok, res) = kkt_certificate(&s, &normals, &rhs, 1, &[0, 1], &[1.0, -1.0], &[0.0, 1.0]);
+        assert!(!ok);
+        assert_eq!(res, 1.0);
+        // A rounding-level negative bound multiplier is tolerated (scaled tol).
+        let (ok, res) =
+            kkt_certificate(&s, &normals, &rhs, 1, &[0, 1], &[0.5, -1e-12], &[0.5, 0.5]);
+        assert!(ok);
+        assert!((res - 1e-12).abs() < 1e-15);
+        // An equality multiplier may be negative.
+        let eq_only = vec![vec![1.0, 1.0]];
+        let (ok, _) = kkt_certificate(&s, &eq_only, &[-1.0], 1, &[0], &[-0.5], &[-0.5, -0.5]);
+        assert!(ok);
     }
 
     #[test]

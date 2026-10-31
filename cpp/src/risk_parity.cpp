@@ -1,8 +1,10 @@
 #include "portopt/risk_parity.hpp"
 
 #include <cmath>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace portopt {
 
@@ -114,7 +116,15 @@ RiskBudgetResult risk_budget_solve(const Matrix& sigma, const Vector& budgets,
 
 Vector risk_budget_weights(const Matrix& sigma, const Vector& budgets, double tol,
                            int max_sweeps) {
-  return risk_budget_solve(sigma, budgets, tol, max_sweeps).weights;
+  RiskBudgetResult res = risk_budget_solve(sigma, budgets, tol, max_sweeps);
+  if (!res.converged) {
+    std::ostringstream msg;
+    msg << std::scientific << std::setprecision(3)
+        << "risk_budget_weights: CCD did not converge within " << res.sweeps
+        << " sweeps (tol " << tol << "); use risk_budget_solve to inspect the iterate";
+    throw std::domain_error(msg.str());
+  }
+  return std::move(res.weights);
 }
 
 Vector erc_weights(const Matrix& sigma, double tol, int max_sweeps) {

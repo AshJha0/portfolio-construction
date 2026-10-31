@@ -1,0 +1,14 @@
+flowchart TD
+    IN["Input: Sigma (SPD gate via Cholesky), budgets b > 0 normalised to sum 1"] --> INIT["y_i = 1/n, cache s = Sigma y"]
+    INIT --> SW["next sweep, keep y_prev = y"]
+    SW --> UPD["for i = 0 .. n-1 ascending:<br/>m_i = s_i - Sigma_ii y_i<br/>y_new = (-m_i + sqrt(m_i^2 + 4 Sigma_ii b_i)) / (2 Sigma_ii)"]
+    UPD --> CACHE["s = s + Sigma[:, i] * (y_new - y_i), then y_i = y_new"]
+    CACHE --> MORE{"more coordinates in this sweep?"}
+    MORE -- yes --> UPD
+    MORE -- no --> STOP{"max_i abs(y_i - y_prev_i) below tol<br/>(1e-10, absolute)?"}
+    STOP -- yes --> OK["risk_budget_solve returns w = y / sum(y), sweeps, converged = true"]
+    STOP -- no --> CAP{"sweeps below max_sweeps (10000)?"}
+    CAP -- yes --> SW
+    CAP -- no --> NC["risk_budget_solve returns w = y / sum(y), max_sweeps, converged = false"]
+    OK --> WR["risk_budget_weights and erc_weights return the weights"]
+    NC --> RAISE["risk_budget_weights and erc_weights raise ValueError"]

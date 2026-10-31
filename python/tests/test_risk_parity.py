@@ -1,4 +1,5 @@
 """Tests for risk contributions, ERC CCD, and risk budgeting."""
+
 import numpy as np
 import pytest
 from scipy.optimize import minimize  # cross-check only
@@ -84,9 +85,7 @@ def test_inverse_vol_weights(moments):
 def test_erc_diagonal_case_equals_inverse_vol():
     """For diagonal covariance, ERC == inverse vol analytically."""
     sig = np.diag([0.04, 0.09, 0.0225, 0.01])
-    assert np.allclose(
-        po.erc_weights(sig), po.inverse_vol_weights(sig), atol=1e-10
-    )
+    assert np.allclose(po.erc_weights(sig), po.inverse_vol_weights(sig), atol=1e-10)
 
 
 def test_erc_two_asset_analytic():
@@ -167,3 +166,22 @@ def test_ccd_cap_reported_not_raised(moments):
         po.risk_budget_solve(sig, tol=0.0)
     with pytest.raises(ValueError, match="max_sweeps"):
         po.risk_budget_solve(sig, max_sweeps=0)
+
+
+def test_weights_only_wrappers_raise_on_sweep_cap(moments):
+    """The weights-only wrappers must not return an unconverged iterate
+    silently: two sweeps leave an RC spread of order 1e-4, so both raise
+    and name the sweep count and tolerance; the *_solve variant still
+    reports the flag."""
+    sig = moments["sigma"]
+    w, sweeps, conv = po.risk_budget_solve(sig, max_sweeps=2)
+    assert not conv and sweeps == 2
+    with pytest.raises(ValueError, match=r"within 2 sweeps \(tol 1\.000e-10\)"):
+        po.erc_weights(sig, max_sweeps=2)
+    with pytest.raises(ValueError, match="within 2 sweeps"):
+        po.risk_budget_weights(
+            sig, [0.5] + [0.5 / (sig.shape[0] - 1)] * (sig.shape[0] - 1), max_sweeps=2
+        )
+    # Default cap: converged, wrappers agree bit-for-bit with the solver.
+    w_s, _, conv_s = po.risk_budget_solve(sig)
+    assert conv_s and np.array_equal(po.erc_weights(sig), w_s)

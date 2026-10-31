@@ -25,7 +25,9 @@ struct GoldenCase {
 }
 
 fn data_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("data")
 }
 
 struct Ctx {
@@ -48,13 +50,25 @@ fn ctx() -> Ctx {
     let cov_d = po::sample_cov(&returns).unwrap();
     let mu = po::annualize_mean(&mu_d, 252.0).unwrap();
     let sig = po::annualize_cov(&cov_d, 252.0).unwrap();
-    Ctx { names, returns, mu_d, cov_d, mu, sig, caps, views }
+    Ctx {
+        names,
+        returns,
+        mu_d,
+        cov_d,
+        mu,
+        sig,
+        caps,
+        views,
+    }
 }
 
 fn golden() -> HashMap<String, GoldenCase> {
     let text = std::fs::read_to_string(data_dir().join("golden").join("golden.json")).unwrap();
     let file: GoldenFile = serde_json::from_str(&text).unwrap();
-    file.cases.into_iter().map(|c| (c.name.clone(), c)).collect()
+    file.cases
+        .into_iter()
+        .map(|c| (c.name.clone(), c))
+        .collect()
 }
 
 fn check(case: &GoldenCase, key: &str, got: f64) {
@@ -71,6 +85,24 @@ fn check(case: &GoldenCase, key: &str, got: f64) {
 }
 
 fn check_vec(case: &GoldenCase, prefix: &str, got: &[f64]) {
+    // Count the `{prefix}_{index}` keys so an empty or truncated result
+    // cannot pass by checking nothing.
+    let stem = format!("{prefix}_");
+    let expected_len = case
+        .expect
+        .keys()
+        .filter(|k| {
+            k.strip_prefix(&stem)
+                .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .count();
+    assert_eq!(
+        got.len(),
+        expected_len,
+        "case {}: vector {prefix} has length {}, expected {expected_len}",
+        case.name,
+        got.len()
+    );
     for (i, &g) in got.iter().enumerate() {
         check(case, &format!("{prefix}_{i}"), g);
     }
@@ -182,11 +214,16 @@ fn golden_all_cases() {
     {
         let case = &g["frontier_constrained_t080"];
         let target = input_f64(case, "target");
-        let res = po::constrained_frontier_solve(&c.mu, &c.sig, target, None, None, po::QP_MAX_ITER)
-            .unwrap();
+        let res =
+            po::constrained_frontier_solve(&c.mu, &c.sig, target, None, None, po::QP_MAX_ITER)
+                .unwrap();
         assert!(res.converged, "frontier QP not certified");
         check_vec(case, "w", &res.weights);
-        check(case, "variance", dot(&res.weights, &c.sig.matvec(&res.weights)));
+        check(
+            case,
+            "variance",
+            dot(&res.weights, &c.sig.matvec(&res.weights)),
+        );
         assert!((dot(&c.mu, &res.weights) - target).abs() < 1e-12);
         covered += 1;
     }
@@ -197,7 +234,8 @@ fn golden_all_cases() {
         let target = input_f64(case, "target");
         let lb = vec![input_f64(case, "lb"); 8];
         let ub = vec![input_f64(case, "ub"); 8];
-        let w = po::constrained_frontier_weights(&c.mu, &c.sig, target, Some(&lb), Some(&ub)).unwrap();
+        let w =
+            po::constrained_frontier_weights(&c.mu, &c.sig, target, Some(&lb), Some(&ub)).unwrap();
         check_vec(case, "w", &w);
         check(case, "variance", dot(&w, &c.sig.matvec(&w)));
         assert!((dot(&c.mu, &w) - target).abs() < 1e-12);
@@ -388,10 +426,21 @@ fn qp_goldens_are_input_stable() {
     let g = golden();
     let c = ctx();
     let rows: Vec<Vec<f64>> = (0..c.returns.nrows())
-        .map(|r| c.returns.row(r).iter().map(|v| v * (1.0 + 2f64.powi(-52))).collect())
+        .map(|r| {
+            c.returns
+                .row(r)
+                .iter()
+                .map(|v| v * (1.0 + 2f64.powi(-52)))
+                .collect()
+        })
         .collect();
     let x2 = Matrix::from_rows(&rows).unwrap();
-    let w = po::min_variance_longonly(&po::annualize_cov(&po::sample_cov(&x2).unwrap(), 252.0).unwrap(), None, None).unwrap();
+    let w = po::min_variance_longonly(
+        &po::annualize_cov(&po::sample_cov(&x2).unwrap(), 252.0).unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
     let case = &g["minvar_longonly_qp"];
     for (i, &v) in w.iter().enumerate() {
         assert!((v - case.expect[&format!("w_{i}")]).abs() < 1e-13);

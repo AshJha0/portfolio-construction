@@ -1,4 +1,5 @@
 """Shared fixtures: bundled data, moments, and golden cases."""
+
 from __future__ import annotations
 
 import json

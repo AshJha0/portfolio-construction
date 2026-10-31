@@ -1,4 +1,5 @@
 """Tests for the quarterly expanding-window backtest and metrics."""
+
 import numpy as np
 import pytest
 
@@ -11,7 +12,18 @@ def equal_fn(h: np.ndarray) -> np.ndarray:
 
 def test_rebalance_schedule_pinned():
     assert po.rebalance_indices(1250, 500, 63) == [
-        500, 563, 626, 689, 752, 815, 878, 941, 1004, 1067, 1130, 1193
+        500,
+        563,
+        626,
+        689,
+        752,
+        815,
+        878,
+        941,
+        1004,
+        1067,
+        1130,
+        1193,
     ]
     assert po.rebalance_indices(600, 500, 63) == [500, 563]
     with pytest.raises(ValueError, match="exceed"):
@@ -23,9 +35,7 @@ def test_rebalance_schedule_pinned():
 def test_metric_hand_values():
     r = np.array([0.01, -0.02, 0.015, 0.0, 0.005])
     assert po.annualized_return(r) == pytest.approx(252 * np.mean(r), abs=1e-15)
-    assert po.annualized_vol(r) == pytest.approx(
-        np.sqrt(252) * np.std(r, ddof=1), abs=1e-15
-    )
+    assert po.annualized_vol(r) == pytest.approx(np.sqrt(252) * np.std(r, ddof=1), abs=1e-15)
     sr = po.sharpe_ratio(r, rf=0.01)
     assert sr == pytest.approx(
         (252 * np.mean(r) - 0.01) / (np.sqrt(252) * np.std(r, ddof=1)), abs=1e-12

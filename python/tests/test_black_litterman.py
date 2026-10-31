@@ -1,4 +1,5 @@
 """Tests for Black-Litterman reverse optimization and posterior."""
+
 import numpy as np
 import pytest
 
@@ -7,7 +8,7 @@ import portopt as po
 
 @pytest.fixture(scope="module")
 def bl_setup(moments, market_caps, views_doc, asset_names):
-    mu, sig = moments["mu"], moments["sigma"]
+    sig = moments["sigma"]
     w_mkt = market_caps / market_caps.sum()
     delta = views_doc["delta"]
     tau = views_doc["tau"]
@@ -176,7 +177,9 @@ def test_views_parse_error_paths(asset_names):
             [{"type": "absolute", "asset": "US_EQ", "q": 0.1, "confidence": 0.0}], asset_names
         )
     # missing confidence defaults to 1
-    _, _, conf = po.views_to_matrices([{"type": "absolute", "asset": "US_EQ", "q": 0.1}], asset_names)
+    _, _, conf = po.views_to_matrices(
+        [{"type": "absolute", "asset": "US_EQ", "q": 0.1}], asset_names
+    )
     assert conf.tolist() == [1.0]
 
 
@@ -186,9 +189,13 @@ def test_omega_and_confidences_together_rejected(bl_setup):
     s = bl_setup
     om = po.default_omega(s["sigma"], s["p"], s["tau"], s["conf"])
     with pytest.raises(ValueError, match="confidences are only used with the default Omega"):
-        po.bl_posterior(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om, confidences=s["conf"])
+        po.bl_posterior(
+            s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om, confidences=s["conf"]
+        )
     with pytest.raises(ValueError, match="confidences are only used with the default Omega"):
-        po.bl_weights(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om, confidences=s["conf"])
+        po.bl_weights(
+            s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om, confidences=s["conf"]
+        )
     # explicit default Omega alone reproduces the confidence-scaled posterior
     a = po.bl_posterior(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], omega=om)
     b = po.bl_posterior(s["sigma"], s["pi"], s["p"], s["q"], s["tau"], confidences=s["conf"])

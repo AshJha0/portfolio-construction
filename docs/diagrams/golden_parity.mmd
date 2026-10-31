@@ -1,0 +1,21 @@
+flowchart TD
+    GEN["data/generate_data.py (seed 42)"] --> CSV["asset_returns.csv written with %.17g,<br/>then re-read from disk"]
+    CSV --> REF["Python reference portopt computes each case"]
+    REF --> VAL{"Validation gate"}
+    VAL --> V1["closed forms vs numpy.linalg.lstsq"]
+    VAL --> V2["Ledoit-Wolf intensity vs covCor.m transcription, 1e-14"]
+    VAL --> V3["QP vs scipy SLSQP: objective not worse, weights within 1e-6"]
+    VAL --> V4["ERC equal contributions, risk budgets met, BL limits"]
+    V1 --> GJ
+    V2 --> GJ
+    V3 --> GJ
+    V4 --> GJ
+    GJ["golden.json: 23 cases, name, inputs, expect, tol"]
+    GJ --> T1["Python: python/tests/test_golden.py"]
+    GJ --> T2["C++: cpp/tests/test_golden.cpp"]
+    GJ --> T3["Rust: rust/tests/golden.rs"]
+    GJ --> T4["Java: GoldenTest.java"]
+    T1 --> CHK["each value: abs(got - expect) at most tol"]
+    T2 --> CHK
+    T3 --> CHK
+    T4 --> CHK

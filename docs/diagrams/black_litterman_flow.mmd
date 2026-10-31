@@ -1,0 +1,18 @@
+flowchart TD
+    SIG["Sigma (annualised covariance)"] --> PI["Reverse optimisation<br/>pi = delta * Sigma * w_mkt"]
+    CAPS["market caps, normalised to w_mkt"] --> PI
+    DELTA["risk aversion delta = 2.5"] --> PI
+    VJSON["views.json: absolute and relative views"] --> VM["views_to_matrices<br/>P (k x n), Q (k), confidences c"]
+    TAU["tau = 0.05"] --> OM
+    VM --> OM{"Omega supplied?"}
+    OM -- no --> OMD["default_omega<br/>Omega_kk = (P tau Sigma P')_kk / c_k"]
+    OM -- yes --> OMX["explicit Omega, confidences not allowed"]
+    OMD --> AK
+    OMX --> AK
+    SIG --> AK["A_k = P tau Sigma P' + Omega<br/>one k x k Cholesky"]
+    PI --> POST
+    AK --> POST["mu_post = pi + tau Sigma P' A_k^-1 (Q - P pi)<br/>M = tau Sigma - tau Sigma P' A_k^-1 P tau Sigma<br/>Sigma_post = Sigma + M"]
+    POST --> W["bl_weights: tangency on mu_post and Sigma_post at rf = 0,<br/>normalised to sum 1"]
+    W --> ERR{"A - rf C > 0 on the posterior?"}
+    ERR -- yes --> OUT["weights and BLResult"]
+    ERR -- no --> TU["TangencyUndefinedError"]

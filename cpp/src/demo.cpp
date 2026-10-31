@@ -6,7 +6,7 @@
 ///
 /// Prints: estimator table, unconstrained + long-only frontier sweep,
 /// Black-Litterman prior vs posterior weights, ERC vs inverse-vol risk
-/// contributions, and a quarterly-rebalance comparison across six methods.
+/// contributions, and a 63-day re-estimation backtest across six methods.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
     const std::vector<std::string>& names = ret.names;
     const double rf = cfg.risk_free_rate;
 
-    std::printf("portopt demo — %zu-asset universe, %zu daily returns\n", x.cols(), x.rows());
+    std::printf("portopt demo: %zu-asset universe, %zu daily returns\n", x.cols(), x.rows());
     std::printf("assets:");
     for (std::size_t i = 0; i < names.size(); ++i) {
       std::printf("%s %s", i == 0 ? "" : ",", names[i].c_str());
@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
     std::printf("RC spread: ERC %.2e, inv-vol %.2e\n", spread(rc_erc), spread(rc_iv));
 
     // -------------------------------------------------------------- backtest
-    rule("Quarterly-rebalance backtest, expanding window (holdout = last 750d)");
+    rule("Backtest: re-estimated every 63 days, daily constant mix (holdout = last 750d)");
     int tangency_fallbacks = 0;
 
     const auto equal_weight_fn = [](const Matrix& h) {

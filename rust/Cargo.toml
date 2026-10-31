@@ -1,9 +1,16 @@
 [package]
 name = "portopt"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
+rust-version = "1.78"
 description = "Portfolio construction: Markowitz, Black-Litterman, risk parity (portfolio-construction reference port)"
 license = "MIT"
+repository = "https://github.com/AshJha0/portfolio-construction"
+homepage = "https://ashjha0.github.io/portfolio-construction/"
+documentation = "https://ashjha0.github.io/portfolio-construction/"
+readme = "../README.md"
+keywords = ["portfolio", "markowitz", "black-litterman", "risk-parity", "optimization"]
+categories = ["finance", "mathematics", "science"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

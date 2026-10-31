@@ -1,0 +1,4 @@
+# Maven build output
+target/
+# output of the old plain-javac scripts
+out/

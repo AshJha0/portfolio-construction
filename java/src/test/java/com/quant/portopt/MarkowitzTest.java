@@ -455,4 +455,57 @@ public class MarkowitzTest {
         assertThrows(IllegalArgumentException.class,
                 () -> Markowitz.minVarianceLongOnly(new double[][] {{0.04, 0.04}, {0.04, 0.04}}));
     }
+
+    @Test
+    public void kktCertificateChecksDualFeasibility() {
+        // min 1/2 |w|^2 s.t. sum w = 1, w >= 0 (S = I, n = 2). The true active
+        // set {sum} gives w = (1/2, 1/2), u = 1/2 and is certified. Forcing the
+        // wrong active set {sum, w_0 >= 0} gives w = (0, 1): primal feasible and
+        // stationary (S w = 1*(1,1) - 1*e_0), but the bound multiplier is -1.
+        double[][] s = {{1.0, 0.0}, {0.0, 1.0}};
+        double[][] normals = {{1.0, 1.0}, {1.0, 0.0}, {0.0, 1.0}};
+        double[] rhs = {1.0, 0.0, 0.0};
+        Markowitz.KktCertificate ok = Markowitz.kktCertificate(
+                s, normals, rhs, 1, new int[] {0}, new double[] {0.5}, new double[] {0.5, 0.5});
+        assertTrue(ok.certified());
+        assertEquals(0.0, ok.residual(), 0.0);
+        Markowitz.KktCertificate bad = Markowitz.kktCertificate(s, normals, rhs, 1,
+                new int[] {0, 1}, new double[] {1.0, -1.0}, new double[] {0.0, 1.0});
+        assertTrue(!bad.certified());
+        assertEquals(1.0, bad.residual(), 0.0);
+        // A rounding-level negative bound multiplier is tolerated (scaled tol).
+        Markowitz.KktCertificate tiny = Markowitz.kktCertificate(s, normals, rhs, 1,
+                new int[] {0, 1}, new double[] {0.5, -1e-12}, new double[] {0.5, 0.5});
+        assertTrue(tiny.certified());
+        assertEquals(1e-12, tiny.residual(), 1e-15);
+        // An equality multiplier may be negative.
+        Markowitz.KktCertificate negEq = Markowitz.kktCertificate(s, new double[][] {{1.0, 1.0}},
+                new double[] {-1.0}, 1, new int[] {0}, new double[] {-0.5},
+                new double[] {-0.5, -0.5});
+        assertTrue(negEq.certified());
+    }
+
+    @Test
+    public void qpWithActiveBoundsStillCertified() {
+        // Dual feasibility holds at the true optimum: problems with several
+        // active bounds stay certified with the same residual bound as before.
+        double[][] sig = TestData.sigmaAnnualized();
+        double[] mu = TestData.muAnnualized();
+        double[][] bounds = {{0.0, Double.POSITIVE_INFINITY}, {0.02, 0.40}, {0.0, 0.25}};
+        for (double[] b : bounds) {
+            Markowitz.QpResult res = Markowitz.minVarianceLongOnlySolve(
+                    sig, new double[] {b[0]}, new double[] {b[1]}, Markowitz.QP_MAX_ITER);
+            assertTrue(res.converged());
+            assertTrue(res.kktResidual() < 1e-12);
+            boolean anyActive = false;
+            for (double v : res.weights()) {
+                anyActive = anyActive || v == b[0] || v == b[1];
+            }
+            assertTrue(anyActive);
+        }
+        Markowitz.QpResult fr = Markowitz.constrainedFrontierSolve(mu, sig, 0.07,
+                new double[] {0.0}, new double[] {0.5}, Markowitz.QP_MAX_ITER);
+        assertTrue(fr.converged());
+        assertTrue(fr.kktResidual() < 1e-9);
+    }
 }

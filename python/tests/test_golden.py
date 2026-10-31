@@ -3,6 +3,7 @@ assert agreement with data/golden/golden.json within its tolerance.
 
 This is the same contract every language port must satisfy.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -169,9 +170,7 @@ def test_simplex_projection_golden(golden):
 
     c = golden["simplex_projection_box"]
     v = np.array([c["inputs"][f"v_{i}"] for i in range(4)])
-    w = po.project_simplex_box(
-        v, c["inputs"]["total"], lb=c["inputs"]["lb"], ub=c["inputs"]["ub"]
-    )
+    w = po.project_simplex_box(v, c["inputs"]["total"], lb=c["inputs"]["lb"], ub=c["inputs"]["ub"])
     assert np.allclose(w, _vec(c["expect"], "w"), atol=c["tol"])
 
 
@@ -208,9 +207,7 @@ def test_bl_posterior_returns_and_weights(golden, ctx):
 
 def test_inverse_vol_golden(golden, ctx):
     c = golden["inverse_vol"]
-    assert np.allclose(
-        po.inverse_vol_weights(ctx["sig"]), _vec(c["expect"], "w"), atol=c["tol"]
-    )
+    assert np.allclose(po.inverse_vol_weights(ctx["sig"]), _vec(c["expect"], "w"), atol=c["tol"])
 
 
 def test_erc_golden(golden, ctx):
@@ -270,7 +267,7 @@ def test_qp_goldens_are_input_stable(golden, ctx):
     """Scaling the returns by (1 + 2^-52) must move the QP goldens by far
     less than their tolerance — the solver is an exact function of the
     active set, not a truncated iteration (was 1.9e-8 with the old PGD)."""
-    x2 = ctx["x"] * (1.0 + 2.0 ** -52)
+    x2 = ctx["x"] * (1.0 + 2.0**-52)
     sig2 = po.annualize_cov(po.sample_cov(x2))
     c = golden["minvar_longonly_qp"]
     assert np.max(np.abs(po.min_variance_longonly(sig2) - _vec(c["expect"], "w"))) < 1e-13

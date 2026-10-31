@@ -22,7 +22,10 @@
 /// single-coordinate update the cached product Sigma y is updated before
 /// the next coordinate. Convergence: after a full sweep,
 /// max_i |y_i - y_i_prev_sweep| < tol (default 1e-10); at most 10000
-/// sweeps (non-convergence is reported via a flag, not thrown).
+/// sweeps. risk_budget_solve reports non-convergence via a flag; the
+/// weights-only wrappers risk_budget_weights and erc_weights throw
+/// std::domain_error when the sweep cap is hit (the same convention as the
+/// weights-only QP wrappers in markowitz.hpp).
 #pragma once
 
 #include "portopt/linalg.hpp"
@@ -60,10 +63,13 @@ RiskBudgetResult risk_budget_solve(const Matrix& sigma, const Vector& budgets = 
                                    double tol = kCcdTol, int max_sweeps = kCcdMaxSweeps);
 
 /// Risk-budget weights (weights only; see risk_budget_solve).
+/// 	hrows std::domain_error if the CCD hits the sweep cap before the
+///   sweep-level step falls below tol (message names sweeps and tol).
 Vector risk_budget_weights(const Matrix& sigma, const Vector& budgets = Vector(),
                            double tol = kCcdTol, int max_sweeps = kCcdMaxSweeps);
 
 /// Equal-risk-contribution weights (equal budgets b_i = 1/n).
+/// 	hrows std::domain_error if the CCD hits the sweep cap.
 Vector erc_weights(const Matrix& sigma, double tol = kCcdTol,
                    int max_sweeps = kCcdMaxSweeps);
 

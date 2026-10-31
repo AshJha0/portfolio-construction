@@ -1,4 +1,5 @@
 """Tests for closed-form Markowitz, simplex projection, and the active-set QP."""
+
 import numpy as np
 import pytest
 from scipy.optimize import minimize  # cross-check only; package itself is scipy-free
@@ -26,6 +27,59 @@ def _slsqp(sig, mu, target, lb, ub):
     )
     assert res.success
     return res.x
+
+
+def _reference_objective(sig, mu, target, lb, ub):
+    """Variance 0.5 w'Sw of a feasible reference point from scipy.
+
+    SLSQP is tried first. Its convergence on random problems depends on the
+    platform's BLAS (CI saw "Iteration limit reached" on macOS and "Positive
+    directional derivative" on Windows for problems it solves on Linux), so a
+    failed run falls back to trust-constr. Any point that is feasible to 1e-9
+    bounds the optimum from above, which is all the comparison needs; the
+    QP's own optimality is checked separately through its KKT certificate.
+    """
+    from scipy.optimize import Bounds, LinearConstraint
+
+    n = sig.shape[0]
+    lo = np.broadcast_to(np.asarray(lb, dtype=float), (n,))
+    hi = np.broadcast_to(np.asarray(ub, dtype=float), (n,))
+
+    def feasible(w):
+        ok = abs(w.sum() - 1.0) <= 1e-9 and np.all(w >= lo - 1e-9) and np.all(w <= hi + 1e-9)
+        return ok and (target is None or abs(mu @ w - target) <= 1e-9)
+
+    cons = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+    if target is not None:
+        cons.append({"type": "eq", "fun": lambda w: mu @ w - target})
+    x0 = np.clip(np.full(n, 1.0 / n), lo, hi)
+    res = minimize(
+        lambda w: 0.5 * w @ sig @ w,
+        x0,
+        jac=lambda w: sig @ w,
+        method="SLSQP",
+        bounds=[(lo[i], None if hi[i] == np.inf else hi[i]) for i in range(n)],
+        constraints=cons,
+        options={"ftol": 1e-15, "maxiter": 1000},
+    )
+    candidates = [res.x] if res.success and feasible(res.x) else []
+    if not candidates:
+        rows = [np.ones(n)] + ([mu] if target is not None else [])
+        rhs = [1.0] + ([target] if target is not None else [])
+        tc = minimize(
+            lambda w: 0.5 * w @ sig @ w,
+            x0,
+            jac=lambda w: sig @ w,
+            hess=lambda w: sig,
+            method="trust-constr",
+            bounds=Bounds(lo, hi),
+            constraints=[LinearConstraint(np.array(rows), rhs, rhs)],
+            options={"gtol": 1e-14, "xtol": 1e-15, "maxiter": 20000},
+        )
+        if feasible(tc.x):
+            candidates.append(tc.x)
+    assert candidates, "no scipy reference point was feasible"
+    return min(float(w @ sig @ w) for w in candidates)
 
 
 def _kkt_residual_longonly(w, grad):
@@ -193,6 +247,7 @@ def test_singular_covariance_rejected(returns):
 
 # ---------------------------------------------------------------- projection
 
+
 def test_simplex_projection_hand_cases():
     # Classic Duchi example.
     w = po.project_simplex_box(np.array([0.9, 0.5, -0.2]))
@@ -217,7 +272,7 @@ def test_simplex_projection_is_euclidean_optimal():
     """Property grid: our projection beats random feasible points in
     Euclidean distance."""
     rng = np.random.default_rng(5)
-    for k in range(20):
+    for _ in range(20):
         v = rng.standard_normal(6)
         w = po.project_simplex_box(v, 1.0, lb=0.0, ub=0.6)
         assert abs(w.sum() - 1.0) < 1e-12
@@ -246,6 +301,7 @@ def test_simplex_projection_infeasible_bounds():
 
 
 # ------------------------------------------------------------------------ QP
+
 
 def test_qp_matches_closed_form_when_constraints_inactive(moments):
     """With wide box bounds the unconstrained sum-to-one minimizer is
@@ -398,14 +454,14 @@ def test_qp_random_problems_vs_scipy():
         lb, ub = 0.0, float(rng.uniform(1.0 / n + 0.05, 1.0))
         res = po.min_variance_longonly_solve(sig, lb=lb, ub=ub)
         assert res.converged
-        w_ref = _slsqp(sig, None, None, lb, ub)
-        assert res.weights @ sig @ res.weights <= w_ref @ sig @ w_ref + 1e-12
+        v_ref = _reference_objective(sig, None, None, lb, ub)
+        assert res.weights @ sig @ res.weights <= v_ref + 1e-12
         r_min, r_max = po.attainable_return_range(mu, lb, ub)
         tgt = mu @ res.weights + 0.5 * (r_max - mu @ res.weights)
         fr = po.constrained_frontier_solve(mu, sig, tgt, lb=lb, ub=ub)
         assert fr.converged and abs(mu @ fr.weights - tgt) < 1e-12
-        w_ref = _slsqp(sig, mu, tgt, lb, ub)
-        assert fr.weights @ sig @ fr.weights <= w_ref @ sig @ w_ref + 1e-12
+        v_ref = _reference_objective(sig, mu, tgt, lb, ub)
+        assert fr.weights @ sig @ fr.weights <= v_ref + 1e-12
 
 
 def test_qp_determinism(moments):
@@ -427,3 +483,43 @@ def test_qp_result_is_frozen_and_weights_only_wrappers_agree(moments):
     assert np.array_equal(res.weights, po.constrained_frontier_weights(mu, sig, 0.07))
     with pytest.raises(AttributeError):
         res.converged = False  # type: ignore[misc]
+
+
+def test_kkt_certificate_checks_dual_feasibility():
+    """min 1/2 |w|^2 s.t. sum w = 1, w >= 0 (S = I, n = 2).  The true active
+    set {sum} gives w = (1/2, 1/2), u = 1/2 and is certified.  Forcing the
+    wrong active set {sum, w_0 >= 0} gives w = (0, 1), which is primal
+    feasible and stationary (S w = 1*(1,1) - 1*e_0) but the bound
+    multiplier is -1 < 0: the certificate must reject it."""
+    from portopt.markowitz import _kkt_certificate
+
+    s = np.eye(2)
+    normals = [np.ones(2), np.array([1.0, 0.0]), np.array([0.0, 1.0])]
+    rhs = np.array([1.0, 0.0, 0.0])
+    ok, resid = _kkt_certificate(s, normals, rhs, 1, [0], [0.5], np.array([0.5, 0.5]))
+    assert ok and resid == 0.0
+    ok, resid = _kkt_certificate(s, normals, rhs, 1, [0, 1], [1.0, -1.0], np.array([0.0, 1.0]))
+    assert not ok and resid == 1.0
+    # A rounding-level negative bound multiplier is tolerated (scaled tol).
+    ok, resid = _kkt_certificate(s, normals, rhs, 1, [0, 1], [0.5, -1e-12], np.array([0.5, 0.5]))
+    assert ok and resid == pytest.approx(1e-12, rel=1e-3)
+    # An equality multiplier may be negative.
+    ok, _ = _kkt_certificate(
+        s, normals[:1], np.array([-1.0]), 1, [0], [-0.5], np.array([-0.5, -0.5])
+    )
+    assert ok
+
+
+def test_qp_with_active_bounds_still_certified(moments):
+    """Dual feasibility holds at the true optimum: the long-only and boxed
+    problems (several bounds active) remain certified, with the same
+    residual bound as before."""
+    mu, sig = moments["mu"], moments["sigma"]
+    for lb, ub in ((0.0, np.inf), (0.02, 0.40), (0.0, 0.25)):
+        res = po.min_variance_longonly_solve(sig, lb=lb, ub=ub)
+        assert res.converged and res.kkt_residual < 1e-12
+        lo = np.broadcast_to(lb, res.weights.shape)
+        hi = np.broadcast_to(ub, res.weights.shape)
+        assert np.any(res.weights == lo) or np.any(res.weights == hi)
+    fr = po.constrained_frontier_solve(mu, sig, 0.07, lb=0.0, ub=0.5)
+    assert fr.converged and fr.kkt_residual < 1e-9

@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e "python[dev]"
+      - name: Lint and format
+        run: ruff check . && ruff format --check .
+      - name: Type-check (mypy --strict)
+        working-directory: python
+        run: mypy
+      - name: Tests
+        run: pytest -q python
+      - name: Demo
+        run: python python/demo.py
+
+  cpp:
+    name: C++26 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select GCC 14 (C++26)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q g++-14
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+      - name: Toolchain
+        run: cmake --version && (${CXX:-c++} --version || true)
+      - name: Configure
+        run: cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DPORTOPT_WERROR=ON
+      - name: Build
+        run: cmake --build cpp/build --config Release --parallel
+      - name: Tests
+        run: ctest --test-dir cpp/build -C Release --output-on-failure
+      - name: Demo
+        working-directory: cpp
+        run: |
+          if [ -f build/Release/portopt_demo.exe ]; then build/Release/portopt_demo.exe; else build/portopt_demo; fi
+
+  cpp-sanitizers:
+    name: C++26 ASan+UBSan (clang)
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v7
+      - run: clang++ --version
+      - run: cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Debug -DPORTOPT_WERROR=ON -DPORTOPT_SANITIZE=ON
+      - run: cmake --build cpp/build --parallel
+      - run: ctest --test-dir cpp/build --output-on-failure
+
+  rust:
+    name: Rust stable / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: rust
+    env:
+      RUSTFLAGS: -D warnings
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
+      - run: cargo doc --no-deps
+      - run: cargo run --release --bin demo
+
+  rust-msrv:
+    name: Rust MSRV (1.78)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve dependencies compatible with rust-version
+        run: CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo update
+      - uses: dtolnay/rust-toolchain@1.78
+      - run: cargo +1.78 test --release
+
+  java:
+    name: Java ${{ matrix.java }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        java: ["25", "27"]
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - run: mvn -B verify
+      - name: Demo
+        run: mvn -B -q exec:java
+
+  demo-parity:
+    name: Four-language demo parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Install GCC 14
+        run: sudo apt-get update -q && sudo apt-get install -y -q g++-14
+      - run: python -m pip install -e python
+      - name: Run the four demos
+        run: |
+          mkdir -p out
+          python python/demo.py > out/python.txt
+          CC=gcc-14 CXX=g++-14 cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DPORTOPT_BUILD_TESTS=OFF
+          cmake --build cpp/build --parallel
+          (cd cpp && build/portopt_demo) > out/cpp.txt
+          (cd rust && cargo run -q --release --bin demo) > out/rust.txt
+          (cd java && mvn -B -q compile exec:java) > out/java.txt
+      - name: Compare against the Python reference
+        run: python scripts/demo_parity.py out/python.txt out/cpp.txt out/rust.txt out/java.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: demo-outputs
+          path: out/

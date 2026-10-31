@@ -1,14 +1,14 @@
 flowchart TD
-    subgraph DATA["data/ (deterministic, seed 42)"]
-        RET[asset_returns.csv<br/>1250 x 8 daily returns]
+    subgraph DATA["data/ (synthetic, generate_data.py, seed 42)"]
+        RET["asset_returns.csv<br/>1250 x 8 daily returns"]
         CAPS[market_caps.csv]
         VIEWS[views.json]
-        CFG[config.json<br/>252, rf, tau, delta, W, step]
+        CFG["config.json<br/>252, rf, tau, delta, W, step"]
     end
 
     subgraph EST["estimators"]
-        MU["sample_mean -> annualize (x252)"]
-        COV["sample_cov (ddof=1) -> annualize"]
+        MU["sample_mean, then annualize (x252)"]
+        COV["sample_cov (ddof=1), then annualize"]
         LW["shrink_covariance<br/>delta*F + (1-delta)*S"]
     end
 
@@ -18,13 +18,14 @@ flowchart TD
     end
 
     subgraph OPT["portfolio constructors"]
-        TF["two_fund_scalars A,B,C,D<br/>min-var / tangency / frontier"]
+        TF["two_fund_scalars A,B,C,D<br/>min-var, tangency, frontier"]
         QP["dual active-set QP + KKT certificate<br/>box min-var, exact-target frontier"]
-        BL["black_litterman<br/>pi = delta*Sigma*w_mkt -> posterior"]
+        BL["black_litterman<br/>pi = delta*Sigma*w_mkt, posterior"]
         RP["risk_parity CCD<br/>y_i quadratic update"]
     end
 
-    BT["backtest: t_k = 500 + 63k,<br/>expanding window, L1 turnover"]
+    BT["backtest: t_k = 500 + 63k,<br/>expanding window, L1 target turnover"]
+    RES["research (Python only, outside the contract)<br/>net-of-cost backtest, Sharpe statistics"]
     OUTG["golden.json (23 cases)"]
     OUTD["demo report"]
 
@@ -49,6 +50,9 @@ flowchart TD
     BL --> BT
     RP --> BT
     RET --> BT
+    OPT --> RES
     BT --> OUTD
+    EST --> OUTG
     OPT --> OUTG
+    BT --> OUTG
     OPT --> OUTD

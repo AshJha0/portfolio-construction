@@ -25,20 +25,23 @@ struct Value {
     double number = 0.0;
     std::string str;
     std::vector<Value> arr;
-    std::vector<std::pair<std::string, Value>> obj;
+    // Object members as parallel key/value vectors: std::pair<std::string, Value>
+    // would need Value complete here, and Value is still being defined.
+    std::vector<std::string> keys;
+    std::vector<Value> vals;
 
     /// Object member lookup; throws when the key is missing.
     const Value& at(const std::string& key) const {
-        for (const auto& kv : obj) {
-            if (kv.first == key) return kv.second;
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            if (keys[i] == key) return vals[i];
         }
         throw std::runtime_error("mini_json: missing key '" + key + "'");
     }
 
     /// True when the object holds `key`.
     bool has(const std::string& key) const {
-        for (const auto& kv : obj) {
-            if (kv.first == key) return true;
+        for (const auto& k : keys) {
+            if (k == key) return true;
         }
         return false;
     }
@@ -207,7 +210,8 @@ private:
             std::string key = parse_string();
             skip_ws();
             expect(':');
-            v.obj.emplace_back(std::move(key), parse_value());
+            v.keys.push_back(std::move(key));
+            v.vals.push_back(parse_value());
             skip_ws();
             const char c = peek();
             ++pos_;

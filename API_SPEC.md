@@ -254,8 +254,13 @@ unrestricted multipliers and are added first, in order.
 7. **Certificate**: `converged` is true iff every equality residual and
    bound violation is `<= 1e-9*(1+max|b|)` and the stationarity residual
    `|Sigma w - N u|_inf <= 1e-9*(1 + |Sigma w|_inf + sum |u_c| |n_c|_inf)`
-   (bound multipliers are non-negative by construction). `kkt_residual`
-   reports the largest of those violations. The weights-only wrappers
+   and every active inequality (bound) multiplier satisfies dual
+   feasibility `u_c >= -1e-9*(1 + |Sigma w|_inf + sum |u_c| |n_c|_inf)`
+   (same scale as stationarity, since a multiplier has gradient units;
+   `u` is the multiplier vector recomputed by the polish, so its sign is
+   checked rather than assumed; equality multipliers are unrestricted).
+   `kkt_residual` reports the largest of the three violations
+   (feasibility, stationarity, `max(0, -min u_bound)`). The weights-only wrappers
    (`min_variance_longonly`, `constrained_frontier_weights`, the sweep)
    **raise** when the certificate fails; the `*_solve` variants return the
    flag and residual.
@@ -359,9 +364,12 @@ Pinned iteration: initialize `y[i] = 1/n`; cache `sy = Sigma y` and
 update it incrementally after each coordinate change
 (`sy += Sigma[:,i] * dy`). Sweep coordinates in ascending order
 `i = 0..n-1`. After each full sweep, converged when
-`max_i |y[i] - y_prev_sweep[i]| < 1e-10`; at most `10000` sweeps;
-non-convergence is reported via a flag, never raised. `tol > 0` and
-`max_sweeps >= 1` are validated.
+`max_i |y[i] - y_prev_sweep[i]| < 1e-10`; at most `10000` sweeps.
+`risk_budget_solve` reports non-convergence via its flag; the
+weights-only wrappers (`risk_budget_weights`, `erc_weights`) **raise**
+when the sweep cap is hit, with a message naming the sweep count and
+`tol`, using the same error type as the weights-only QP wrappers (3.6).
+`tol > 0` and `max_sweeps >= 1` are validated.
 Output weights: `w = y / sum(y)`.
 
 At the fixed point `y_i * (Sigma y)_i = b_i` exactly, so the normalized
@@ -439,7 +447,7 @@ Each maps history `h` (daily returns, rows `[0, t_k)`) to weights:
 | `max(mu) <= A/C` (or `r_max <= r_gmv`) | "frontier grid empty" error (3.4) |
 | box bounds infeasible (sum lb > 1, sum ub < 1, lb > ub, lb = -inf) | projection/QP error (3.5) |
 | QP certificate fails (numerically inconsistent input) | `converged=False` from `*_solve`; weights-only wrappers raise (3.6) |
-| CCD hits sweep cap | flag reported, no exception (5) |
+| CCD hits sweep cap | flag from `risk_budget_solve`; weights-only wrappers raise (5) |
 | empty views, empty/duplicate names, unknown name/type, missing key, `long == short`, NaN q, zero P row, bad Q length | error (4.2) |
 | explicit Omega together with confidences | error (4.4) |
 | tau outside (0, 1]; confidence <= 0; delta <= 0 | error (4.1, 4.3, 4.4) |

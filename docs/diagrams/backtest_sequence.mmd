@@ -1,5 +1,5 @@
 sequenceDiagram
-    participant D as Demo / caller
+    participant D as Demo or caller
     participant B as run_backtest
     participant W as weight_fn
     participant M as metrics
@@ -8,11 +8,11 @@ sequenceDiagram
     B->>B: validate T >= W+2 and rf finite
     B->>B: dates = [500, 563, ..., 1193] (12)
     loop each rebalance t_k
-        B->>W: history = X[0 : t_k]  (expanding, read-only, no look-ahead)
+        B->>W: history = X[0 : t_k] (expanding, read-only, no look-ahead)
         W-->>B: w_k (finite, sum = 1 within 1e-6, else error)
-        B->>B: port[t_k .. t_end) = X[t_k .. t_end) . w_k
+        B->>B: port[t] = X[t] . w_k for t in [t_k, t_next), daily constant mix
     end
-    B->>B: turnover_k = sum_i |w_k - w_(k-1)|, k >= 1
+    B->>B: turnover_k = sum_i abs(w_k - w_(k-1)) for k >= 1, no costs charged
     B->>M: port (750 daily returns)
-    M-->>B: ann_return, ann_vol, sharpe, maxDD
+    M-->>B: ann_return (252 x mean), ann_vol, sharpe, maxDD
     B-->>D: BacktestResult
