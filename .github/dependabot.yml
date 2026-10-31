@@ -13,6 +13,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Newer criterion needs a Rust newer than the crate's MSRV (1.78);
+      # it is a dev-only benchmark dependency, so it does not set the MSRV.
+      - dependency-name: "criterion"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: maven
     directory: /java
     schedule:
