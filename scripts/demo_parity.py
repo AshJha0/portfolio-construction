@@ -4,21 +4,39 @@ Usage:  python scripts/demo_parity.py py.txt cpp.txt rust.txt java.txt
 
 Each file is a captured demo stdout.  Before comparing we normalise line
 endings (CRLF to LF), trailing whitespace, and the one non-ASCII character
-the demos print (the em dash in the title, which Java prints as a hyphen).
-Every number must then match the Python reference character for character.
+the demos have printed (an em dash, which Java printed as a hyphen).
+One line is a pure rounding residual, ``max |mu'w - target|`` for the
+long-only frontier: its value (around 1e-17) depends on how numpy's BLAS
+orders the dot product, so it is replaced by a pass/fail token (below
+1e-12 or not). Every other number must match the Python reference
+character for character.
 Exits non-zero and prints a unified diff on the first mismatch.
 """
 
 from __future__ import annotations
 
 import difflib
+import re
 import sys
 from pathlib import Path
+
+RESIDUAL = re.compile(r"^(long-only targets met exactly: max \|mu'w - target\| = )(\S+)$")
+
+
+def _mask_residual(line: str) -> str:
+    m = RESIDUAL.match(line)
+    if not m:
+        return line
+    try:
+        ok = abs(float(m.group(2))) < 1e-12
+    except ValueError:
+        ok = False
+    return m.group(1) + ("<1e-12" if ok else f"{m.group(2)} (NOT below 1e-12)")
 
 
 def normalise(text: str) -> list[str]:
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("—", "-")
-    return [line.rstrip() for line in text.strip("\n").split("\n")]
+    return [_mask_residual(line.rstrip()) for line in text.strip("\n").split("\n")]
 
 
 def main(argv: list[str]) -> int:
